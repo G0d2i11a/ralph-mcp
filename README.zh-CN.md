@@ -13,9 +13,11 @@
 
 - **PRD 解析** - 从 markdown PRD 文件中提取 User Stories
 - **Git Worktree 隔离** - 每个 PRD 在独立的 worktree 中运行
+- **后台执行** - 配合 Claude Code 的 Task 工具并行执行多个 PRD
 - **进度追踪** - 通过 `ralph_status()` 实时查看状态
 - **自动合并** - 一键合并，支持冲突解决策略
 - **完成通知** - PRD 完成时弹出 Windows Toast 通知
+- **状态持久化** - 重启 Claude Code 不丢失状态（JSON 存储）
 
 ## 安装
 
@@ -79,21 +81,90 @@ npm run build
 
 ## 使用方法
 
+### 基本流程
+
 ```javascript
-// 启动 PRD 执行
+// 1. 启动 PRD 执行
 ralph_start({ prdPath: "tasks/prd-feature.md" })
 
-// 查看所有状态
+// 2. 随时查看状态
+ralph_status()
+
+// 3. 完成后合并
+ralph_merge({ branch: "ralph/prd-feature" })
+```
+
+### 配合 Claude Code Task 工具并行执行
+
+Ralph MCP 设计为配合 Claude Code 的 Task 工具实现并行 PRD 执行：
+
+```
+1. 分析 PRD，识别可以并行执行的独立任务
+2. 通过 ralph_start() 启动多个 PRD
+3. 为每个 PRD 启动后台 Task agent
+4. 继续聊天 - 规划下一个功能、审查代码等
+5. PRD 完成时收到 Windows Toast 通知
+6. 通过 ralph_merge() 将完成的 PRD 合并到 main
+```
+
+**示例会话：**
+
+```
+用户: 并行执行这 3 个 PRD
+
+Claude: 让我分析一下这些 PRD...
+        - prd-auth.md（独立）
+        - prd-dashboard.md（独立）
+        - prd-api.md（独立）
+
+        3 个都可以并行执行。正在启动...
+
+        [为每个 PRD 调用 ralph_start()]
+        [启动 3 个后台 Task agent]
+
+        PRD 正在后台运行。你可以继续其他工作。
+        完成后我会通知你。
+
+用户: 好的，等待的时候我们来规划下一个功能...
+
+[稍后 - Windows Toast 通知弹出]
+
+Claude: 3 个 PRD 全部完成！
+        - ralph/prd-auth: 4/4 US ✓
+        - ralph/prd-dashboard: 3/3 US ✓
+        - ralph/prd-api: 5/5 US ✓
+
+        准备合并吗？
+
+用户: 是的，全部合并
+
+Claude: [为每个分支调用 ralph_merge()]
+        所有 PRD 已成功合并到 main。
+```
+
+### API 参考
+
+```javascript
+// 启动 PRD 执行（返回 agent prompt）
+ralph_start({ prdPath: "tasks/prd-feature.md" })
+
+// 查看所有 PRD 状态
 ralph_status()
 
 // 获取单个 PRD 详情
 ralph_get({ branch: "ralph/prd-feature" })
 
-// 更新 US 状态（agent 完成后调用）
+// 更新 User Story 状态（agent 调用）
 ralph_update({ branch: "ralph/prd-feature", storyId: "US-1", passes: true, notes: "..." })
 
-// 合并完成的 PRD
+// 停止执行
+ralph_stop({ branch: "ralph/prd-feature" })
+
+// 合并到 main
 ralph_merge({ branch: "ralph/prd-feature" })
+
+// 记录 Task agent ID（用于追踪）
+ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
 ```
 
 ## PRD 格式
@@ -146,6 +217,33 @@ priority: high
 
 - 状态文件：`~/.ralph/state.json`
 - 日志目录：`~/.ralph/logs/`
+
+可通过 `RALPH_DATA_DIR` 环境变量覆盖数据目录。
+
+## 高级选项
+
+### ralph_start 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `prdPath` | 必填 | PRD markdown 文件路径 |
+| `projectRoot` | 当前目录 | 项目根目录 |
+| `worktree` | `true` | 创建隔离的 git worktree |
+| `autoStart` | `true` | 返回 agent prompt 以便立即执行 |
+| `autoMerge` | `false` | 所有 story 通过后自动合并 |
+| `notifyOnComplete` | `true` | 完成时显示 Windows 通知 |
+| `onConflict` | `"agent"` | 冲突解决策略：`auto_theirs`, `auto_ours`, `notify`, `agent` |
+
+### 带参数示例
+
+```javascript
+ralph_start({
+  prdPath: "tasks/prd-feature.md",
+  autoMerge: true,           // 完成后自动合并
+  notifyOnComplete: true,    // Windows Toast 通知
+  onConflict: "auto_theirs"  // 冲突时优先 main
+})
+```
 
 ## 致谢
 
