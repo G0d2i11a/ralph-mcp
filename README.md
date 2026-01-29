@@ -3,21 +3,31 @@
 [![npm version](https://badge.fury.io/js/ralph-mcp.svg)](https://www.npmjs.com/package/ralph-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-MCP server for autonomous PRD execution with Claude Code. Git worktree isolation, progress tracking, auto-merge.
+Autonomous parallel PRD execution for Claude Code. Automatically parses PRDs, creates isolated worktrees, tracks progress, and merges completed features.
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
 [中文文档](./README.zh-CN.md)
 
+## Why Ralph MCP?
+
+| Without Ralph | With Ralph |
+|---------------|------------|
+| One feature at a time | Multiple features in parallel |
+| Manual git branch management | Automatic worktree isolation |
+| Lost progress on restart | Persistent state (JSON) |
+| Manual merge coordination | Serial merge queue |
+| No visibility into progress | Real-time status tracking |
+
 ## Features
 
-- **PRD Parsing** - Extracts User Stories from markdown PRD files
-- **Git Worktree Isolation** - Each PRD runs in isolated worktree
-- **Background Execution** - Works with Claude Code's Task tool for parallel PRD execution
+- **Parallel Execution** - Run multiple PRDs simultaneously with Claude Code Task tool
+- **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
+- **Smart Merge Queue** - Serial merging prevents parallel merge conflicts
 - **Progress Tracking** - Real-time status via `ralph_status()`
-- **Auto Merge** - One-click merge with conflict resolution
-- **Notifications** - Windows Toast when PRD completes
 - **State Persistence** - Survives Claude Code restarts (JSON storage)
+- **Auto Merge** - One-click merge with conflict resolution strategies
+- **Notifications** - Windows Toast when PRD completes
 
 ## Installation
 

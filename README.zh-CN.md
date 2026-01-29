@@ -3,21 +3,31 @@
 [![npm version](https://badge.fury.io/js/ralph-mcp.svg)](https://www.npmjs.com/package/ralph-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-用于 Claude Code 自主执行 PRD 的 MCP 服务器。支持 Git worktree 隔离、进度追踪、自动合并。
+自主并行执行 PRD 的 Claude Code MCP 服务器。自动解析 PRD、创建隔离 worktree、追踪进度、合并完成的功能。
 
 基于 [Geoffrey Huntley 的 Ralph 模式](https://ghuntley.com/ralph/)。
 
 [English](./README.md)
 
+## 为什么选择 Ralph MCP？
+
+| 没有 Ralph | 有 Ralph |
+|------------|----------|
+| 一次只能做一个功能 | 多个功能并行执行 |
+| 手动管理 git 分支 | 自动 worktree 隔离 |
+| 重启后进度丢失 | 状态持久化（JSON） |
+| 手动协调合并 | 串行合并队列 |
+| 看不到执行进度 | 实时状态追踪 |
+
 ## 特性
 
-- **PRD 解析** - 从 markdown PRD 文件中提取 User Stories
-- **Git Worktree 隔离** - 每个 PRD 在独立的 worktree 中运行
-- **后台执行** - 配合 Claude Code 的 Task 工具并行执行多个 PRD
+- **并行执行** - 配合 Claude Code Task 工具同时执行多个 PRD
+- **Git Worktree 隔离** - 每个 PRD 在独立 worktree 中运行，零冲突
+- **智能合并队列** - 串行合并避免并行合并冲突
 - **进度追踪** - 通过 `ralph_status()` 实时查看状态
-- **自动合并** - 一键合并，支持冲突解决策略
-- **完成通知** - PRD 完成时弹出 Windows Toast 通知
 - **状态持久化** - 重启 Claude Code 不丢失状态（JSON 存储）
+- **自动合并** - 一键合并，支持多种冲突解决策略
+- **完成通知** - PRD 完成时弹出 Windows Toast 通知
 
 ## 安装
 
