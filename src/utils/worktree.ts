@@ -49,20 +49,40 @@ export async function createWorktree(
 }
 
 /**
- * Remove a git worktree
+ * Remove a git worktree and optionally delete the branch
  */
 export async function removeWorktree(
   projectRoot: string,
-  worktreePath: string
+  worktreePath: string,
+  deleteBranch: boolean = true
 ): Promise<void> {
-  if (!existsSync(worktreePath)) {
-    console.log(`Worktree does not exist at ${worktreePath}`);
-    return;
+  // Get branch name before removing worktree
+  let branchToDelete: string | null = null;
+  if (deleteBranch) {
+    const worktrees = listWorktrees(projectRoot);
+    const worktree = worktrees.find((w) => w.path === worktreePath);
+    if (worktree?.branch) {
+      branchToDelete = worktree.branch;
+    }
   }
 
-  await execAsync(`git worktree remove "${worktreePath}" --force`, {
-    cwd: projectRoot,
-  });
+  if (existsSync(worktreePath)) {
+    await execAsync(`git worktree remove "${worktreePath}" --force`, {
+      cwd: projectRoot,
+    });
+  }
+
+  // Delete the branch after worktree is removed
+  if (branchToDelete) {
+    try {
+      await execAsync(`git branch -D "${branchToDelete}"`, {
+        cwd: projectRoot,
+      });
+      console.log(`Deleted branch: ${branchToDelete}`);
+    } catch (e) {
+      console.error(`Failed to delete branch ${branchToDelete}:`, e);
+    }
+  }
 }
 
 /**
