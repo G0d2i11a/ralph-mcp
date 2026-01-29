@@ -35,8 +35,7 @@ function parsePrdMarkdown(content) {
     const titleMatch = body.match(/^#\s+(.+)$/m);
     const title = frontmatter.title || titleMatch?.[1] || "Untitled PRD";
     // Extract branch name from frontmatter or generate from title
-    const branchName = frontmatter.branch ||
-        `ralph/${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const branchName = frontmatter.branch || generateBranchName(title);
     // Extract description
     const descMatch = body.match(/##\s*(?:Description|描述|Overview|概述)\s*\n([\s\S]*?)(?=\n##|\n$)/i);
     const description = descMatch?.[1]?.trim() || title;

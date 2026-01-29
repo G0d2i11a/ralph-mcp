@@ -8,11 +8,23 @@ const execAsync = promisify(exec);
  */
 export async function syncMainToBranch(worktreePath, branch) {
     try {
-        // Fetch latest main
-        await execAsync("git fetch origin main", { cwd: worktreePath });
-        // Try to merge main into feature branch
+        // Check if origin remote exists
+        let hasOrigin = false;
         try {
-            await execAsync("git merge origin/main --no-edit", { cwd: worktreePath });
+            const { stdout } = await execAsync("git remote", { cwd: worktreePath });
+            hasOrigin = stdout.includes("origin");
+        }
+        catch {
+            hasOrigin = false;
+        }
+        // Fetch latest main only if origin exists
+        if (hasOrigin) {
+            await execAsync("git fetch origin main", { cwd: worktreePath });
+        }
+        // Try to merge main into feature branch
+        const mergeTarget = hasOrigin ? "origin/main" : "main";
+        try {
+            await execAsync(`git merge ${mergeTarget} --no-edit`, { cwd: worktreePath });
             return {
                 success: true,
                 hasConflicts: false,
