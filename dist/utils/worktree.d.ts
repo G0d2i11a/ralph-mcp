@@ -8,9 +8,9 @@ export interface WorktreeInfo {
  */
 export declare function createWorktree(projectRoot: string, branch: string): Promise<string>;
 /**
- * Remove a git worktree
+ * Remove a git worktree and optionally delete the branch
  */
-export declare function removeWorktree(projectRoot: string, worktreePath: string): Promise<void>;
+export declare function removeWorktree(projectRoot: string, worktreePath: string, deleteBranch?: boolean): Promise<void>;
 /**
  * List all worktrees
  */
