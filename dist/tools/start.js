@@ -10,7 +10,7 @@ export const startInputSchema = z.object({
     projectRoot: z.string().optional().describe("Project root directory (defaults to cwd)"),
     worktree: z.boolean().default(true).describe("Create a worktree for isolation"),
     autoStart: z.boolean().default(true).describe("Generate agent prompt for auto-start"),
-    autoMerge: z.boolean().default(false).describe("Auto add to merge queue when all stories pass"),
+    autoMerge: z.boolean().default(true).describe("Auto add to merge queue when all stories pass"),
     notifyOnComplete: z.boolean().default(true).describe("Show Windows notification when all stories complete"),
     onConflict: z
         .enum(["auto_theirs", "auto_ours", "notify", "agent"])
