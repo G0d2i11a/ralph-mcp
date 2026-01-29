@@ -10,6 +10,7 @@ import {
   updateExecution,
   updateUserStory,
 } from "../store/state.js";
+import { mergeQueueAction } from "./merge.js";
 
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
@@ -86,6 +87,15 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
         createdAt: new Date(),
       });
       addedToMergeQueue = true;
+
+      // Auto-process merge queue (fire and forget)
+      setImmediate(async () => {
+        try {
+          await mergeQueueAction({ action: "process" });
+        } catch (e) {
+          console.error("Auto-merge failed:", e);
+        }
+      });
     }
   }
 
