@@ -167,7 +167,8 @@ export async function getBranchCommits(
 }
 
 /**
- * Update TODO.md to mark PRD as completed
+ * Update TODO.md to mark PRD-related items as completed
+ * Uses fuzzy matching based on keywords from the PRD description
  */
 export function updateTodoDoc(
   projectRoot: string,
@@ -181,15 +182,34 @@ export function updateTodoDoc(
 
   try {
     let content = readFileSync(todoPath, "utf-8");
+    let updated = false;
 
-    // Find and update the PRD entry (mark as completed)
-    // Pattern: - [ ] PRD description -> - [x] PRD description
-    const prdPattern = new RegExp(
-      `- \\[ \\] (.*${description.slice(0, 30)}.*|.*${branch}.*)`
-    );
-    if (prdPattern.test(content)) {
-      content = content.replace(prdPattern, "- [x] $1");
-      writeFileSync(todoPath, content, "utf-8");
+    // Extract keywords from description and branch for matching
+    const keywords = extractKeywords(description, branch);
+
+    // Find unchecked items that match keywords
+    const lines = content.split("\n");
+    const updatedLines = lines.map((line) => {
+      // Only process unchecked items
+      if (!line.match(/^(\s*)- \[ \]/)) {
+        return line;
+      }
+
+      // Check if line matches any keywords
+      const lineLower = line.toLowerCase();
+      const matchCount = keywords.filter((kw) => lineLower.includes(kw)).length;
+
+      // Require at least 2 keyword matches for confidence
+      if (matchCount >= 2) {
+        updated = true;
+        return line.replace("- [ ]", "- [x]");
+      }
+
+      return line;
+    });
+
+    if (updated) {
+      writeFileSync(todoPath, updatedLines.join("\n"), "utf-8");
       return true;
     }
 
@@ -197,6 +217,43 @@ export function updateTodoDoc(
   } catch {
     return false;
   }
+}
+
+/**
+ * Extract keywords from PRD description and branch name
+ */
+function extractKeywords(description: string, branch: string): string[] {
+  const keywords: string[] = [];
+
+  // Common words to ignore
+  const stopWords = new Set([
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "as", "is", "was", "are", "were", "been",
+    "be", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "must", "shall", "can", "need",
+    "prd", "ralph", "user", "want", "that", "this", "which", "who",
+  ]);
+
+  // Extract from description
+  const descWords = description
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w));
+
+  keywords.push(...descWords);
+
+  // Extract from branch name (e.g., ralph/prd-speaking-dialogue-coach)
+  const branchWords = branch
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w));
+
+  keywords.push(...branchWords);
+
+  // Dedupe and return
+  return [...new Set(keywords)];
 }
 
 /**
