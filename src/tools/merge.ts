@@ -373,8 +373,21 @@ async function mergeBranchWithMessage(
   const { promisify } = await import("util");
   const execPromise = promisify(execAsync);
 
-  // Checkout main and pull
-  await execPromise("git checkout main && git pull", { cwd: projectRoot });
+  // Check if origin remote exists
+  let hasOrigin = false;
+  try {
+    const { stdout } = await execPromise("git remote", { cwd: projectRoot });
+    hasOrigin = stdout.includes("origin");
+  } catch {
+    hasOrigin = false;
+  }
+
+  // Checkout main and pull (only if origin exists)
+  if (hasOrigin) {
+    await execPromise("git checkout main && git pull", { cwd: projectRoot });
+  } else {
+    await execPromise("git checkout main", { cwd: projectRoot });
+  }
 
   // Build merge strategy
   let mergeStrategy = "";
