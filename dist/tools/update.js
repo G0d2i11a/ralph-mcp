@@ -1,6 +1,7 @@
 import { z } from "zod";
 import notifier from "node-notifier";
 import { findExecutionByBranch, findMergeQueueItemByExecutionId, findUserStoryById, insertMergeQueueItem, listMergeQueue, listUserStoriesByExecutionId, updateExecution, updateUserStory, } from "../store/state.js";
+import { mergeQueueAction } from "./merge.js";
 export const updateInputSchema = z.object({
     branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
     storyId: z.string().describe("Story ID (e.g., US-001)"),
@@ -49,6 +50,15 @@ export async function update(input) {
                 createdAt: new Date(),
             });
             addedToMergeQueue = true;
+            // Auto-process merge queue (fire and forget)
+            setImmediate(async () => {
+                try {
+                    await mergeQueueAction({ action: "process" });
+                }
+                catch (e) {
+                    console.error("Auto-merge failed:", e);
+                }
+            });
         }
     }
     // Send Windows toast notification when all complete (if enabled)
