@@ -13,9 +13,11 @@ Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
 - **PRD Parsing** - Extracts User Stories from markdown PRD files
 - **Git Worktree Isolation** - Each PRD runs in isolated worktree
+- **Background Execution** - Works with Claude Code's Task tool for parallel PRD execution
 - **Progress Tracking** - Real-time status via `ralph_status()`
 - **Auto Merge** - One-click merge with conflict resolution
 - **Notifications** - Windows Toast when PRD completes
+- **State Persistence** - Survives Claude Code restarts (JSON storage)
 
 ## Installation
 
@@ -79,21 +81,90 @@ Restart Claude Code to load.
 
 ## Usage
 
+### Basic Workflow
+
 ```javascript
-// Start PRD execution
+// 1. Start PRD execution
 ralph_start({ prdPath: "tasks/prd-feature.md" })
 
-// Check all status
+// 2. Check status anytime
+ralph_status()
+
+// 3. Merge when complete
+ralph_merge({ branch: "ralph/prd-feature" })
+```
+
+### Parallel Execution with Claude Code Task Tool
+
+Ralph MCP is designed to work with Claude Code's Task tool for parallel PRD execution:
+
+```
+1. Analyze PRDs to identify independent tasks that can run in parallel
+2. Start multiple PRDs via ralph_start()
+3. Launch background Task agents for each PRD
+4. Continue chatting - plan next features, review code, etc.
+5. Get Windows Toast notification when PRDs complete
+6. Merge completed PRDs to main via ralph_merge()
+```
+
+**Example session:**
+
+```
+User: Execute these 3 PRDs in parallel
+
+Claude: Let me analyze the PRDs...
+        - prd-auth.md (independent)
+        - prd-dashboard.md (independent)
+        - prd-api.md (independent)
+
+        All 3 can run in parallel. Starting...
+
+        [Calls ralph_start() for each PRD]
+        [Launches 3 background Task agents]
+
+        PRDs are running in background. You can continue working.
+        I'll notify you when they complete.
+
+User: Great, let's plan the next feature while waiting...
+
+[Later - Windows Toast notification appears]
+
+Claude: All 3 PRDs completed successfully!
+        - ralph/prd-auth: 4/4 US ✓
+        - ralph/prd-dashboard: 3/3 US ✓
+        - ralph/prd-api: 5/5 US ✓
+
+        Ready to merge?
+
+User: Yes, merge all
+
+Claude: [Calls ralph_merge() for each branch]
+        All PRDs merged to main successfully.
+```
+
+### API Reference
+
+```javascript
+// Start PRD execution (returns agent prompt)
+ralph_start({ prdPath: "tasks/prd-feature.md" })
+
+// View all PRD status
 ralph_status()
 
 // Get single PRD details
 ralph_get({ branch: "ralph/prd-feature" })
 
-// Update US status (agent calls this after completing a story)
+// Update User Story status (called by agent)
 ralph_update({ branch: "ralph/prd-feature", storyId: "US-1", passes: true, notes: "..." })
 
-// Merge completed PRD
+// Stop execution
+ralph_stop({ branch: "ralph/prd-feature" })
+
+// Merge to main
 ralph_merge({ branch: "ralph/prd-feature" })
+
+// Record Task agent ID (for tracking)
+ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
 ```
 
 ## PRD Format
@@ -146,6 +217,33 @@ Users can log into their accounts.
 
 - State: `~/.ralph/state.json`
 - Logs: `~/.ralph/logs/`
+
+Override data directory with `RALPH_DATA_DIR` environment variable.
+
+## Advanced Options
+
+### ralph_start options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `prdPath` | required | Path to PRD markdown file |
+| `projectRoot` | cwd | Project root directory |
+| `worktree` | `true` | Create isolated git worktree |
+| `autoStart` | `true` | Return agent prompt for immediate execution |
+| `autoMerge` | `false` | Auto-merge when all stories pass |
+| `notifyOnComplete` | `true` | Show Windows notification on completion |
+| `onConflict` | `"agent"` | Conflict resolution: `auto_theirs`, `auto_ours`, `notify`, `agent` |
+
+### Example with options
+
+```javascript
+ralph_start({
+  prdPath: "tasks/prd-feature.md",
+  autoMerge: true,           // Auto-merge when done
+  notifyOnComplete: true,    // Windows Toast notification
+  onConflict: "auto_theirs"  // Prefer main on conflicts
+})
+```
 
 ## Credits
 
