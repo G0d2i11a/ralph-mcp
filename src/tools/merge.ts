@@ -385,11 +385,31 @@ async function mergeBranchWithMessage(
     hasOrigin = false;
   }
 
+  // Stash any uncommitted changes before checkout
+  let hasStash = false;
+  try {
+    const { stdout: stashOutput } = await execPromise(
+      "git stash --include-untracked",
+      { cwd: projectRoot }
+    );
+    hasStash = !stashOutput.includes("No local changes to save");
+  } catch {
+    // Ignore stash errors
+  }
+
   // Checkout main and pull (only if origin exists)
-  if (hasOrigin) {
-    await execPromise("git checkout main && git pull", { cwd: projectRoot });
-  } else {
-    await execPromise("git checkout main", { cwd: projectRoot });
+  try {
+    if (hasOrigin) {
+      await execPromise("git checkout main && git pull", { cwd: projectRoot });
+    } else {
+      await execPromise("git checkout main", { cwd: projectRoot });
+    }
+  } catch (checkoutError) {
+    // Restore stash if checkout fails
+    if (hasStash) {
+      await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
+    }
+    throw checkoutError;
   }
 
   // Check if branch is already merged into main
@@ -407,6 +427,10 @@ async function mergeBranchWithMessage(
       const { stdout: hash } = await execPromise("git rev-parse HEAD", {
         cwd: projectRoot,
       });
+      // Restore stash before returning
+      if (hasStash) {
+        await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
+      }
       return {
         success: true,
         commitHash: hash.trim(),
@@ -426,6 +450,13 @@ async function mergeBranchWithMessage(
     mergeStrategy = "-X ours";
   }
 
+  // Helper to restore stash
+  const restoreStash = async () => {
+    if (hasStash) {
+      await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
+    }
+  };
+
   try {
     // Use heredoc-style commit message to handle special characters
     const escapedMessage = commitMessage.replace(/'/g, "'\\''");
@@ -441,6 +472,7 @@ async function mergeBranchWithMessage(
     // Check if "Already up to date" (no new commit created)
     const alreadyUpToDate = mergeOutput.includes("Already up to date");
 
+    await restoreStash();
     return {
       success: true,
       commitHash: hash.trim(),
@@ -459,6 +491,7 @@ async function mergeBranchWithMessage(
       .map((line: string) => line.slice(3));
 
     if (conflictFiles.length > 0) {
+      // Don't restore stash yet - conflicts need to be resolved first
       return {
         success: false,
         hasConflicts: true,
@@ -466,6 +499,7 @@ async function mergeBranchWithMessage(
       };
     }
 
+    await restoreStash();
     throw new Error("Merge failed for unknown reason");
   }
 }
