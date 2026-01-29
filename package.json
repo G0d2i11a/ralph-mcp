@@ -1,0 +1,54 @@
+{
+  "name": "ralph-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for autonomous PRD execution with Claude Code. Git worktree isolation, progress tracking, auto-merge.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ralph-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "prd",
+    "ai-agent",
+    "autonomous",
+    "git-worktree"
+  ],
+  "author": "G0d2i11a",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/G0d2i11a/ralph-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/G0d2i11a/ralph-mcp/issues"
+  },
+  "homepage": "https://github.com/G0d2i11a/ralph-mcp#readme",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "gray-matter": "^4.0.3",
+    "node-notifier": "^10.0.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/node-notifier": "^8.0.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
