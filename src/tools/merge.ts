@@ -360,11 +360,12 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
 
 /**
  * Merge branch with custom commit message
- * Uses worktree for all operations to avoid touching main repo's working directory
+ * Always merges in projectRoot (main repo) since it's already on main branch.
+ * Worktree is only used for development, not for merging.
  */
 async function mergeBranchWithMessage(
   projectRoot: string,
-  worktreePath: string | undefined,
+  _worktreePath: string | undefined, // Unused, kept for API compatibility
   branch: string,
   commitMessage: string,
   onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent"
@@ -379,8 +380,8 @@ async function mergeBranchWithMessage(
   const { promisify } = await import("util");
   const execPromise = promisify(execAsync);
 
-  // Use worktree if available, otherwise fall back to projectRoot
-  const cwd = worktreePath || projectRoot;
+  // Always merge in projectRoot (main repo is already on main branch)
+  const cwd = projectRoot;
 
   // Check if origin remote exists
   let hasOrigin = false;
@@ -391,12 +392,13 @@ async function mergeBranchWithMessage(
     hasOrigin = false;
   }
 
-  // Fetch latest main
+  // Fetch latest main and pull
   if (hasOrigin) {
     try {
       await execPromise("git fetch origin main", { cwd });
+      await execPromise("git pull origin main", { cwd });
     } catch {
-      // Ignore fetch errors
+      // Ignore fetch/pull errors
     }
   }
 
@@ -425,16 +427,6 @@ async function mergeBranchWithMessage(
     // Continue with merge attempt if check fails
   }
 
-  // Checkout main in worktree
-  try {
-    await execPromise("git checkout main", { cwd });
-    if (hasOrigin) {
-      await execPromise("git pull origin main", { cwd });
-    }
-  } catch (checkoutError) {
-    throw new Error(`Failed to checkout main: ${checkoutError}`);
-  }
-
   // Build merge strategy
   let mergeStrategy = "";
   if (onConflict === "auto_theirs") {
@@ -444,7 +436,7 @@ async function mergeBranchWithMessage(
   }
 
   try {
-    // Perform merge in worktree
+    // Perform merge (main repo is already on main branch, no checkout needed)
     const escapedMessage = commitMessage.replace(/'/g, "'\\''");
     const { stdout: mergeOutput } = await execPromise(
       `git merge --no-ff ${mergeStrategy} "${branch}" -m '${escapedMessage}'`,
@@ -460,15 +452,6 @@ async function mergeBranchWithMessage(
     // Push to origin if available
     if (hasOrigin) {
       await execPromise("git push origin main", { cwd });
-    } else if (worktreePath && worktreePath !== projectRoot) {
-      // For local repos without origin, update main branch in projectRoot
-      // by fetching from worktree
-      try {
-        await execPromise(`git fetch "${worktreePath}" main:main`, { cwd: projectRoot });
-      } catch {
-        // Fallback: user can manually pull
-        console.log("Note: Run 'git pull' in main repo to sync changes");
-      }
     }
 
     return {
