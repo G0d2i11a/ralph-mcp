@@ -1,8 +1,13 @@
 # Ralph MCP
 
+[![npm version](https://badge.fury.io/js/ralph-mcp.svg)](https://www.npmjs.com/package/ralph-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 MCP server for autonomous PRD execution with Claude Code. Git worktree isolation, progress tracking, auto-merge.
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
+
+[中文文档](./README.zh-CN.md)
 
 ## Features
 
@@ -93,21 +98,37 @@ ralph_merge({ branch: "ralph/prd-feature" })
 
 ## PRD Format
 
-Ralph parses markdown PRD files with User Stories:
+Ralph parses markdown PRD files. Example:
 
 ```markdown
-# Feature Name
+---
+title: User Authentication
+priority: high
+---
+
+# User Authentication
+
+Implement user login and registration.
 
 ## User Stories
 
-### US-1: Story Title
+### US-1: User Registration
+
+Users can create new accounts.
 
 **Acceptance Criteria:**
-- [ ] Criterion 1
-- [ ] Criterion 2
+- [ ] Email validation
+- [ ] Password strength check
+- [ ] Confirmation email sent
 
-### US-2: Another Story
-...
+### US-2: User Login
+
+Users can log into their accounts.
+
+**Acceptance Criteria:**
+- [ ] Email/password authentication
+- [ ] Remember me option
+- [ ] Forgot password flow
 ```
 
 ## Conflict Resolution
@@ -123,8 +144,13 @@ Ralph parses markdown PRD files with User Stories:
 
 ## Data Storage
 
-- State: `~/.ralph/state.json` (JSON file)
+- State: `~/.ralph/state.json`
 - Logs: `~/.ralph/logs/`
+
+## Credits
+
+- [Geoffrey Huntley](https://ghuntley.com/) - Original Ralph pattern
+- [Anthropic](https://anthropic.com/) - Claude Code & MCP protocol
 
 ## License
 
