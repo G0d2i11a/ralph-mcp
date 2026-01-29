@@ -162,6 +162,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     console.log(">>> Merging to main...");
     const mergeResult = await mergeBranchWithMessage(
       exec.projectRoot,
+      exec.worktreePath || undefined,
       exec.branch,
       commitMessage,
       onConflict as "auto_theirs" | "auto_ours" | "notify" | "agent"
@@ -359,9 +360,11 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
 
 /**
  * Merge branch with custom commit message
+ * Uses worktree for all operations to avoid touching main repo's working directory
  */
 async function mergeBranchWithMessage(
   projectRoot: string,
+  worktreePath: string | undefined,
   branch: string,
   commitMessage: string,
   onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent"
@@ -376,47 +379,33 @@ async function mergeBranchWithMessage(
   const { promisify } = await import("util");
   const execPromise = promisify(execAsync);
 
+  // Use worktree if available, otherwise fall back to projectRoot
+  const cwd = worktreePath || projectRoot;
+
   // Check if origin remote exists
   let hasOrigin = false;
   try {
-    const { stdout } = await execPromise("git remote", { cwd: projectRoot });
+    const { stdout } = await execPromise("git remote", { cwd });
     hasOrigin = stdout.includes("origin");
   } catch {
     hasOrigin = false;
   }
 
-  // Stash any uncommitted changes before checkout
-  let hasStash = false;
-  try {
-    const { stdout: stashOutput } = await execPromise(
-      "git stash --include-untracked",
-      { cwd: projectRoot }
-    );
-    hasStash = !stashOutput.includes("No local changes to save");
-  } catch {
-    // Ignore stash errors
-  }
-
-  // Checkout main and pull (only if origin exists)
-  try {
-    if (hasOrigin) {
-      await execPromise("git checkout main && git pull", { cwd: projectRoot });
-    } else {
-      await execPromise("git checkout main", { cwd: projectRoot });
+  // Fetch latest main
+  if (hasOrigin) {
+    try {
+      await execPromise("git fetch origin main", { cwd });
+    } catch {
+      // Ignore fetch errors
     }
-  } catch (checkoutError) {
-    // Restore stash if checkout fails
-    if (hasStash) {
-      await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
-    }
-    throw checkoutError;
   }
 
   // Check if branch is already merged into main
   try {
+    const mergeBase = hasOrigin ? "origin/main" : "main";
     const { stdout: mergedBranches } = await execPromise(
-      "git branch --merged main",
-      { cwd: projectRoot }
+      `git branch --merged ${mergeBase}`,
+      { cwd }
     );
     const isMerged = mergedBranches
       .split("\n")
@@ -424,13 +413,7 @@ async function mergeBranchWithMessage(
       .includes(branch);
 
     if (isMerged) {
-      const { stdout: hash } = await execPromise("git rev-parse HEAD", {
-        cwd: projectRoot,
-      });
-      // Restore stash before returning
-      if (hasStash) {
-        await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
-      }
+      const { stdout: hash } = await execPromise(`git rev-parse ${mergeBase}`, { cwd });
       return {
         success: true,
         commitHash: hash.trim(),
@@ -442,6 +425,16 @@ async function mergeBranchWithMessage(
     // Continue with merge attempt if check fails
   }
 
+  // Checkout main in worktree
+  try {
+    await execPromise("git checkout main", { cwd });
+    if (hasOrigin) {
+      await execPromise("git pull origin main", { cwd });
+    }
+  } catch (checkoutError) {
+    throw new Error(`Failed to checkout main: ${checkoutError}`);
+  }
+
   // Build merge strategy
   let mergeStrategy = "";
   if (onConflict === "auto_theirs") {
@@ -450,40 +443,43 @@ async function mergeBranchWithMessage(
     mergeStrategy = "-X ours";
   }
 
-  // Helper to restore stash
-  const restoreStash = async () => {
-    if (hasStash) {
-      await execPromise("git stash pop", { cwd: projectRoot }).catch(() => {});
-    }
-  };
-
   try {
-    // Use heredoc-style commit message to handle special characters
+    // Perform merge in worktree
     const escapedMessage = commitMessage.replace(/'/g, "'\\''");
     const { stdout: mergeOutput } = await execPromise(
       `git merge --no-ff ${mergeStrategy} "${branch}" -m '${escapedMessage}'`,
-      { cwd: projectRoot }
+      { cwd }
     );
 
-    const { stdout: hash } = await execPromise("git rev-parse HEAD", {
-      cwd: projectRoot,
-    });
+    const { stdout: hash } = await execPromise("git rev-parse HEAD", { cwd });
+    const commitHash = hash.trim();
 
     // Check if "Already up to date" (no new commit created)
     const alreadyUpToDate = mergeOutput.includes("Already up to date");
 
-    await restoreStash();
+    // Push to origin if available
+    if (hasOrigin) {
+      await execPromise("git push origin main", { cwd });
+    } else if (worktreePath && worktreePath !== projectRoot) {
+      // For local repos without origin, update main branch in projectRoot
+      // by fetching from worktree
+      try {
+        await execPromise(`git fetch "${worktreePath}" main:main`, { cwd: projectRoot });
+      } catch {
+        // Fallback: user can manually pull
+        console.log("Note: Run 'git pull' in main repo to sync changes");
+      }
+    }
+
     return {
       success: true,
-      commitHash: hash.trim(),
+      commitHash,
       hasConflicts: false,
       alreadyMerged: alreadyUpToDate,
     };
   } catch {
     // Check for conflicts
-    const { stdout: status } = await execPromise("git status --porcelain", {
-      cwd: projectRoot,
-    });
+    const { stdout: status } = await execPromise("git status --porcelain", { cwd });
 
     const conflictFiles = status
       .split("\n")
@@ -491,7 +487,6 @@ async function mergeBranchWithMessage(
       .map((line: string) => line.slice(3));
 
     if (conflictFiles.length > 0) {
-      // Don't restore stash yet - conflicts need to be resolved first
       return {
         success: false,
         hasConflicts: true,
@@ -499,7 +494,6 @@ async function mergeBranchWithMessage(
       };
     }
 
-    await restoreStash();
     throw new Error("Merge failed for unknown reason");
   }
 }
