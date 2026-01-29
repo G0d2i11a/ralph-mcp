@@ -221,7 +221,9 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
           : { typeCheck: true, build: true },
         docsUpdated: docsUpdated.length > 0 ? docsUpdated : undefined,
         mergedStories: completedStories.map((s) => s.id),
-        message: `Successfully merged ${input.branch} to main`,
+        message: mergeResult.alreadyMerged
+          ? `Branch ${input.branch} was already merged to main`
+          : `Successfully merged ${input.branch} to main`,
       };
     }
 
@@ -368,6 +370,7 @@ async function mergeBranchWithMessage(
   commitHash?: string;
   hasConflicts: boolean;
   conflictFiles?: string[];
+  alreadyMerged?: boolean;
 }> {
   const { exec: execAsync } = await import("child_process");
   const { promisify } = await import("util");
@@ -389,6 +392,32 @@ async function mergeBranchWithMessage(
     await execPromise("git checkout main", { cwd: projectRoot });
   }
 
+  // Check if branch is already merged into main
+  try {
+    const { stdout: mergedBranches } = await execPromise(
+      "git branch --merged main",
+      { cwd: projectRoot }
+    );
+    const isMerged = mergedBranches
+      .split("\n")
+      .map((b: string) => b.trim().replace(/^\* /, ""))
+      .includes(branch);
+
+    if (isMerged) {
+      const { stdout: hash } = await execPromise("git rev-parse HEAD", {
+        cwd: projectRoot,
+      });
+      return {
+        success: true,
+        commitHash: hash.trim(),
+        hasConflicts: false,
+        alreadyMerged: true,
+      };
+    }
+  } catch {
+    // Continue with merge attempt if check fails
+  }
+
   // Build merge strategy
   let mergeStrategy = "";
   if (onConflict === "auto_theirs") {
@@ -400,7 +429,7 @@ async function mergeBranchWithMessage(
   try {
     // Use heredoc-style commit message to handle special characters
     const escapedMessage = commitMessage.replace(/'/g, "'\\''");
-    await execPromise(
+    const { stdout: mergeOutput } = await execPromise(
       `git merge --no-ff ${mergeStrategy} "${branch}" -m '${escapedMessage}'`,
       { cwd: projectRoot }
     );
@@ -409,10 +438,14 @@ async function mergeBranchWithMessage(
       cwd: projectRoot,
     });
 
+    // Check if "Already up to date" (no new commit created)
+    const alreadyUpToDate = mergeOutput.includes("Already up to date");
+
     return {
       success: true,
       commitHash: hash.trim(),
       hasConflicts: false,
+      alreadyMerged: alreadyUpToDate,
     };
   } catch {
     // Check for conflicts
