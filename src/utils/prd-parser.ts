@@ -62,8 +62,7 @@ function parsePrdMarkdown(content: string): ParsedPrd {
 
   // Extract branch name from frontmatter or generate from title
   const branchName =
-    (frontmatter.branch as string) ||
-    `ralph/${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    (frontmatter.branch as string) || generateBranchName(title);
 
   // Extract description
   const descMatch = body.match(
