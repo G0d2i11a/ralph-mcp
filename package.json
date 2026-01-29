@@ -20,7 +20,11 @@
     "prd",
     "ai-agent",
     "autonomous",
-    "git-worktree"
+    "git-worktree",
+    "project-management",
+    "task-management",
+    "user-story",
+    "merge-queue"
   ],
   "author": "G0d2i11a",
   "license": "MIT",
