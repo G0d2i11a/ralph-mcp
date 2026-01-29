@@ -26,12 +26,24 @@ export async function syncMainToBranch(
   branch: string
 ): Promise<SyncResult> {
   try {
-    // Fetch latest main
-    await execAsync("git fetch origin main", { cwd: worktreePath });
+    // Check if origin remote exists
+    let hasOrigin = false;
+    try {
+      const { stdout } = await execAsync("git remote", { cwd: worktreePath });
+      hasOrigin = stdout.includes("origin");
+    } catch {
+      hasOrigin = false;
+    }
+
+    // Fetch latest main only if origin exists
+    if (hasOrigin) {
+      await execAsync("git fetch origin main", { cwd: worktreePath });
+    }
 
     // Try to merge main into feature branch
+    const mergeTarget = hasOrigin ? "origin/main" : "main";
     try {
-      await execAsync("git merge origin/main --no-edit", { cwd: worktreePath });
+      await execAsync(`git merge ${mergeTarget} --no-edit`, { cwd: worktreePath });
       return {
         success: true,
         hasConflicts: false,
