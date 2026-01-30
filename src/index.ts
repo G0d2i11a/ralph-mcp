@@ -57,8 +57,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             autoMerge: {
               type: "boolean",
-              description: "Auto add to merge queue when all stories pass (default: false)",
-              default: false,
+              description: "Auto add to merge queue when all stories pass (default: true)",
+              default: true,
             },
             notifyOnComplete: {
               type: "boolean",
