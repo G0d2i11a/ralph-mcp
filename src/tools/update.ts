@@ -1,5 +1,8 @@
 import { z } from "zod";
 import notifier from "node-notifier";
+import { appendFile, mkdir } from "fs/promises";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
 import {
   findExecutionByBranch,
   findMergeQueueItemByExecutionId,
@@ -31,6 +34,16 @@ export interface UpdateResult {
   addedToMergeQueue: boolean;
 }
 
+function formatDate(date: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const MM = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const HH = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  return `${yyyy}-${MM}-${dd} ${HH}:${mm}`;
+}
+
 export async function update(input: UpdateInput): Promise<UpdateResult> {
   // Find execution by branch
   const exec = await findExecutionByBranch(input.branch);
@@ -54,6 +67,27 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     passes: input.passes,
     notes: input.notes || story.notes,
   });
+
+  // Append to ralph-progress.md if passed
+  if (input.passes && exec.worktreePath) {
+    try {
+      const progressPath = join(exec.worktreePath, "ralph-progress.md");
+      const dir = dirname(progressPath);
+      
+      if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true });
+      }
+
+      const timestamp = formatDate(new Date());
+      const notesContent = input.notes || story.notes || "No notes provided.";
+      const entry = `## [${timestamp}] ${story.storyId}: ${story.title}\n${notesContent}\n\n`;
+      
+      await appendFile(progressPath, entry, "utf-8");
+    } catch (e) {
+      console.error("Failed to write to ralph-progress.md:", e);
+      // Continue execution even if logging fails
+    }
+  }
 
   // Update execution timestamp and status
   const allStories = await listUserStoriesByExecutionId(exec.id);
