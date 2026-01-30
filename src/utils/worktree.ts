@@ -1,5 +1,5 @@
 import { execSync, exec } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, appendFileSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 
@@ -43,6 +43,17 @@ export async function createWorktree(
       `git worktree add -b "${branch}" "${worktreePath}" main`,
       { cwd: projectRoot }
     );
+  }
+
+  // Prevent ralph-progress.md from being committed
+  try {
+    const excludePath = join(worktreePath, ".git", "info", "exclude");
+    if (existsSync(excludePath)) {
+      appendFileSync(excludePath, "\nralph-progress.md\n", "utf-8");
+    }
+  } catch (e) {
+    console.error("Failed to update .git/info/exclude:", e);
+    // Non-fatal error
   }
 
   return worktreePath;

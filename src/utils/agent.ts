@@ -41,6 +41,17 @@ ${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
     )
     .join("\n");
 
+  // Read progress log if it exists
+  let progressLog = "";
+  const progressPath = join(worktreePath, "ralph-progress.md");
+  if (existsSync(progressPath)) {
+    try {
+      progressLog = readFileSync(progressPath, "utf-8");
+    } catch (e) {
+      // Ignore read errors
+    }
+  }
+
   return `You are an autonomous coding agent working on the "${branch}" branch.
 
 ## Working Directory
@@ -48,18 +59,21 @@ ${worktreePath}
 
 ## PRD: ${description}
 
+${progressLog ? `## Progress & Learnings\n${progressLog}\n` : ""}
+
 ## Pending User Stories
 ${storiesText}
 
 ## Instructions
 
-1. Work on ONE user story at a time, starting with the highest priority
-2. Implement the feature to satisfy all acceptance criteria
-3. Run quality checks: \`pnpm check-types\` and \`pnpm --filter api build\`
-4. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
-5. After completing a story, call \`ralph_update\` to mark it as passed:
-   \`ralph_update({ branch: "${branch}", storyId: "${pendingStories[0].storyId}", passes: true, notes: "..." })\`
-6. Continue to the next story until all are complete
+1. Work on ONE user story at a time, starting with the highest priority.
+2. ${progressLog ? "Review the 'Progress & Learnings' section above to understand previous decisions and context." : "Check if 'ralph-progress.md' exists and review it for context."}
+3. Implement the feature to satisfy all acceptance criteria.
+4. Run quality checks: \`pnpm check-types\` and \`pnpm --filter api build\` (adjust command for the specific repo structure if needed).
+5. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
+6. After completing a story, call \`ralph_update\` to mark it as passed:
+   \`ralph_update({ branch: "${branch}", storyId: "${pendingStories[0].storyId}", passes: true, notes: "Brief summary of implementation, key decisions, and any learnings." })\`
+7. Continue to the next story until all are complete.
 
 ## Quality Requirements
 - ALL commits must pass typecheck and build
