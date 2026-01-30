@@ -1,5 +1,5 @@
 import { execSync, exec } from "child_process";
-import { existsSync, appendFileSync } from "fs";
+import { existsSync, appendFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 
@@ -47,9 +47,25 @@ export async function createWorktree(
 
   // Prevent ralph-progress.md from being committed
   try {
-    const excludePath = join(worktreePath, ".git", "info", "exclude");
+    const { stdout: gitCommonDir } = await execAsync("git rev-parse --git-common-dir", {
+      cwd: worktreePath,
+    });
+    const excludePath = join(gitCommonDir.trim(), "info", "exclude");
+
+    // Ensure info directory exists
+    // (git-common-dir usually returns absolute path or relative to cwd.
+    // If relative, join with worktreePath might be needed, but rev-parse usually returns absolute if outside?
+    // Actually rev-parse --git-common-dir usually returns absolute path if called with proper context or relative.
+    // Safest is to resolve it.)
+
+    // Let's rely on reading current content to check if needed
+    let content = "";
     if (existsSync(excludePath)) {
-      appendFileSync(excludePath, "\nralph-progress.md\n", "utf-8");
+      content = readFileSync(excludePath, "utf-8");
+    }
+
+    if (!content.includes("ralph-progress.md")) {
+       appendFileSync(excludePath, "\nralph-progress.md\n", "utf-8");
     }
   } catch (e) {
     console.error("Failed to update .git/info/exclude:", e);
