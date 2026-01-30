@@ -39,6 +39,8 @@ Claude: ralph_start → Task Agent handles everything automatically
 - **2-Step Workflow** - Just create PRD and run `ralph_start`, everything else is automatic
 - **Parallel Execution** - Run 5+ PRDs simultaneously with Claude Code Task tool
 - **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
+- **Agent Memory** - Persistent "Progress Log" learns from mistakes across User Stories
+- **Context Injection** - Inject project rules (CLAUDE.md) into agent context
 - **Auto Quality Gates** - Type check, lint, build before every commit
 - **Auto Merge** - Merges to main when all User Stories pass
 - **Doc Sync** - Automatically updates TODO.md with completed items
@@ -276,6 +278,7 @@ Override data directory with `RALPH_DATA_DIR` environment variable.
 | `autoMerge` | `false` | Auto-merge when all stories pass |
 | `notifyOnComplete` | `true` | Show Windows notification on completion |
 | `onConflict` | `"agent"` | Conflict resolution: `auto_theirs`, `auto_ours`, `notify`, `agent` |
+| `contextInjectionPath` | `undefined` | Optional path to file (e.g. CLAUDE.md) to inject into prompt |
 
 ### Example with options
 
