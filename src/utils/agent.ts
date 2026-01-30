@@ -19,7 +19,8 @@ export function generateAgentPrompt(
     acceptanceCriteria: string[];
     priority: number;
     passes: boolean;
-  }>
+  }>,
+  contextInjectionPath?: string
 ): string {
   const pendingStories = stories
     .filter((s) => !s.passes)
@@ -52,12 +53,24 @@ ${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
     }
   }
 
+  // Read injected context if provided
+  let injectedContext = "";
+  if (contextInjectionPath && existsSync(contextInjectionPath)) {
+    try {
+      injectedContext = readFileSync(contextInjectionPath, "utf-8");
+    } catch (e) {
+      // Ignore read errors
+    }
+  }
+
   return `You are an autonomous coding agent working on the "${branch}" branch.
 
 ## Working Directory
 ${worktreePath}
 
 ## PRD: ${description}
+
+${injectedContext ? `## Project Context\n${injectedContext}\n` : ""}
 
 ${progressLog ? `## Progress & Learnings\n${progressLog}\n` : ""}
 

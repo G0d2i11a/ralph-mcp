@@ -21,6 +21,10 @@ export const startInputSchema = z.object({
     .enum(["auto_theirs", "auto_ours", "notify", "agent"])
     .default("agent")
     .describe("Conflict resolution strategy for merge"),
+  contextInjectionPath: z
+    .string()
+    .optional()
+    .describe("Path to a file (e.g., CLAUDE.md) to inject into the agent prompt"),
 });
 
 export type StartInput = z.infer<typeof startInputSchema>;
@@ -104,6 +108,10 @@ export async function start(input: StartInput): Promise<StartResult> {
   // Generate agent prompt if auto-start
   let agentPrompt: string | null = null;
   if (input.autoStart) {
+    const contextPath = input.contextInjectionPath
+      ? resolve(projectRoot, input.contextInjectionPath)
+      : undefined;
+
     agentPrompt = generateAgentPrompt(
       prd.branchName,
       prd.description,
@@ -115,7 +123,8 @@ export async function start(input: StartInput): Promise<StartResult> {
         acceptanceCriteria: s.acceptanceCriteria,
         priority: s.priority,
         passes: s.passes,
-      }))
+      })),
+      contextPath
     );
   }
 
