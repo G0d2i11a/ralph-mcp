@@ -15,11 +15,35 @@ if (!existsSync(RALPH_DATA_DIR)) {
 
 export type ExecutionStatus =
   | "pending"
+  | "ready"      // Dependencies satisfied, waiting for Runner to pick up
+  | "starting"   // Runner claimed, Agent launching
   | "running"
   | "completed"
   | "failed"
   | "stopped"
   | "merging";
+
+/**
+ * Valid state transitions for ExecutionStatus.
+ * Key: current status, Value: array of valid next statuses
+ */
+export const VALID_TRANSITIONS: Record<ExecutionStatus, ExecutionStatus[]> = {
+  pending: ["ready", "running", "stopped", "failed"],           // ready when deps satisfied, running if no deps
+  ready: ["starting", "stopped", "failed", "pending"],          // starting when Runner claims, back to pending if deps change
+  starting: ["running", "ready", "failed", "stopped"],          // running when Agent starts, ready on launch failure (retry)
+  running: ["completed", "failed", "stopped", "merging"],       // normal execution flow
+  completed: ["merging"],                                        // only to merging
+  failed: ["running", "ready", "stopped"],                       // retry scenarios
+  stopped: [],                                                   // terminal state
+  merging: ["completed", "failed"],                              // merge result
+};
+
+/**
+ * Check if a status transition is valid.
+ */
+export function isValidTransition(from: ExecutionStatus, to: ExecutionStatus): boolean {
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
 
 export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 

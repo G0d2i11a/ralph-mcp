@@ -111,7 +111,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             status: {
               type: "string",
-              enum: ["pending", "running", "completed", "failed", "stopped", "merging"],
+              enum: ["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"],
               description: "Filter by status",
             },
             reconcile: {
