@@ -26,7 +26,8 @@ export function generateAgentPrompt(
     consecutiveNoProgress: number;
     consecutiveErrors: number;
     lastError: string | null;
-  }
+  },
+  resumeContext?: string
 ): string {
   const pendingStories = stories
     .filter((s) => !s.passes)
@@ -100,7 +101,7 @@ ${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
 ${worktreePath}
 
 ## PRD: ${description}
-
+${resumeContext ? `\n## Resume Context\n${resumeContext}\n` : ""}
 ## Progress
 - Completed: ${completedCount}/${totalCount} stories
 - Current story: ${pendingStories[0].storyId}
