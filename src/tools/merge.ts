@@ -15,6 +15,8 @@ import {
   updateTodoDoc,
   updateProjectStatus,
   handleSchemaConflict,
+  updatePrdMetadata,
+  updatePrdIndex,
 } from "../utils/merge-helpers.js";
 import { execSync } from "child_process";
 import {
@@ -169,7 +171,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     );
 
     if (mergeResult.success) {
-      // Step 5: Update docs
+      // Step 5: Update docs and PRD metadata
       const docsUpdated: string[] = [];
       if (updateTodoDoc(exec.projectRoot, exec.branch, exec.description)) {
         docsUpdated.push("docs/TODO.md");
@@ -184,6 +186,13 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         )
       ) {
         docsUpdated.push("docs/PROJECT-STATUS.md");
+      }
+      // Update PRD file with completion metadata
+      if (exec.prdPath && mergeResult.commitHash) {
+        if (updatePrdMetadata(exec.prdPath, exec.branch, mergeResult.commitHash)) {
+          docsUpdated.push(exec.prdPath);
+        }
+        updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, mergeResult.commitHash);
       }
 
       // Commit doc updates if any
@@ -206,6 +215,14 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         } catch (e) {
           console.error("Failed to remove worktree:", e);
         }
+      }
+
+      // Step 7: Delete branch after successful merge
+      try {
+        execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+        console.log(`>>> Deleted branch ${exec.branch}`);
+      } catch (e) {
+        console.error(`Failed to delete branch ${exec.branch}:`, e);
       }
 
       // Update status
@@ -266,6 +283,20 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
                 }
               }
 
+              // Delete branch after successful merge
+              try {
+                execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+                console.log(`>>> Deleted branch ${exec.branch}`);
+              } catch (e) {
+                console.error(`Failed to delete branch ${exec.branch}:`, e);
+              }
+
+              // Update PRD metadata
+              if (exec.prdPath) {
+                updatePrdMetadata(exec.prdPath, exec.branch, commitHash);
+                updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
+              }
+
               await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
 
               return {
@@ -322,6 +353,20 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
             cwd: exec.projectRoot,
             encoding: "utf-8",
           }).trim();
+
+          // Delete branch after successful merge
+          try {
+            execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+            console.log(`>>> Deleted branch ${exec.branch}`);
+          } catch (e) {
+            console.error(`Failed to delete branch ${exec.branch}:`, e);
+          }
+
+          // Update PRD metadata
+          if (exec.prdPath) {
+            updatePrdMetadata(exec.prdPath, exec.branch, commitHash);
+            updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
+          }
 
         await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
 
