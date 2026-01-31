@@ -1,4 +1,5 @@
 import { exec } from "child_process";
+import { existsSync } from "fs";
 import { promisify } from "util";
 import { z } from "zod";
 import {
@@ -6,11 +7,15 @@ import {
   listUserStoriesByExecutionId,
   deleteExecution,
   deleteMergeQueueByExecutionId,
+  updateExecution,
   ExecutionRecord,
 } from "../store/state.js";
 import { removeWorktree } from "../utils/worktree.js";
 
 const execAsync = promisify(exec);
+
+// Timeout threshold for detecting interrupted executions (30 minutes)
+const INTERRUPT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export const statusInputSchema = z.object({
   project: z.string().optional().describe("Filter by project name"),
@@ -43,12 +48,16 @@ export interface ExecutionStatus {
   consecutiveNoProgress: number;
   consecutiveErrors: number;
   lastError: string | null;
+  // Interrupt detection
+  isInterrupted: boolean;
+  interruptReason: string | null;
+  worktreeDirty: string | null; // Summary of uncommitted changes
 }
 
 export interface ReconcileAction {
   branch: string;
   previousStatus: string;
-  action: "deleted" | "skipped";
+  action: "deleted" | "skipped" | "marked_interrupted";
   reason: string;
 }
 
@@ -60,9 +69,11 @@ export interface StatusResult {
     completed: number;
     failed: number;
     pending: number;
+    interrupted: number; // Executions that were interrupted (session closed)
     atRisk: number; // Executions approaching stagnation threshold
   };
   reconciled?: ReconcileAction[];
+  suggestions?: string[]; // Suggested actions for the user
 }
 
 /**
@@ -97,8 +108,72 @@ async function isBranchMergedToMain(
 }
 
 /**
+ * Get worktree dirty status (uncommitted changes summary).
+ */
+async function getWorktreeDirtyStatus(
+  worktreePath: string
+): Promise<string | null> {
+  if (!existsSync(worktreePath)) {
+    return null;
+  }
+
+  try {
+    const { stdout } = await execAsync("git status --porcelain", {
+      cwd: worktreePath,
+    });
+
+    if (!stdout.trim()) {
+      return null; // Clean
+    }
+
+    const lines = stdout.trim().split("\n");
+    const modified = lines.filter((l) => l.startsWith(" M") || l.startsWith("M ")).length;
+    const added = lines.filter((l) => l.startsWith("A ")).length;
+    const untracked = lines.filter((l) => l.startsWith("??")).length;
+    const deleted = lines.filter((l) => l.startsWith(" D") || l.startsWith("D ")).length;
+
+    const parts: string[] = [];
+    if (modified > 0) parts.push(`${modified} modified`);
+    if (added > 0) parts.push(`${added} added`);
+    if (untracked > 0) parts.push(`${untracked} untracked`);
+    if (deleted > 0) parts.push(`${deleted} deleted`);
+
+    return parts.join(", ") || `${lines.length} changes`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if an execution is interrupted (running but no activity for too long).
+ */
+function isExecutionInterrupted(exec: ExecutionRecord): {
+  interrupted: boolean;
+  reason: string | null;
+} {
+  if (exec.status !== "running") {
+    return { interrupted: false, reason: null };
+  }
+
+  const lastActivity = exec.updatedAt.getTime();
+  const now = Date.now();
+  const elapsed = now - lastActivity;
+
+  if (elapsed > INTERRUPT_TIMEOUT_MS) {
+    const minutes = Math.round(elapsed / 60000);
+    return {
+      interrupted: true,
+      reason: `No activity for ${minutes} minutes (likely session closed)`,
+    };
+  }
+
+  return { interrupted: false, reason: null };
+}
+
+/**
  * Reconcile execution status with git reality.
- * If a branch is merged to main but status is not "completed", clean it up.
+ * - If a branch is merged to main but status is not "completed", clean it up.
+ * - If a running execution has no activity for too long, mark it as interrupted.
  */
 async function reconcileExecutions(
   executions: ExecutionRecord[]
@@ -106,11 +181,12 @@ async function reconcileExecutions(
   const actions: ReconcileAction[] = [];
 
   for (const exec of executions) {
-    // Only reconcile non-completed, non-stopped executions
+    // Skip completed or stopped executions
     if (exec.status === "completed" || exec.status === "stopped") {
       continue;
     }
 
+    // Check if branch is already merged
     const isMerged = await isBranchMergedToMain(exec.branch, exec.projectRoot);
 
     if (isMerged) {
@@ -137,12 +213,40 @@ async function reconcileExecutions(
           action: "deleted",
           reason: "Branch already merged to main",
         });
+        continue;
       } catch (error) {
         actions.push({
           branch: exec.branch,
           previousStatus: exec.status,
           action: "skipped",
           reason: `Failed to clean up: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    // Check if running execution is interrupted (zombie)
+    const { interrupted, reason } = isExecutionInterrupted(exec);
+    if (interrupted && reason) {
+      try {
+        // Mark as failed so it can be retried
+        await updateExecution(exec.id, {
+          status: "failed",
+          lastError: reason,
+          updatedAt: new Date(),
+        });
+
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "marked_interrupted",
+          reason,
+        });
+      } catch (error) {
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "skipped",
+          reason: `Failed to mark interrupted: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
     }
@@ -183,6 +287,14 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     const completedStories = stories.filter((s) => s.passes).length;
     const totalStories = stories.length;
 
+    // Check interrupt status
+    const { interrupted, reason: interruptReason } = isExecutionInterrupted(exec);
+
+    // Get worktree dirty status
+    const worktreeDirty = exec.worktreePath
+      ? await getWorktreeDirtyStatus(exec.worktreePath)
+      : null;
+
     executionStatuses.push({
       branch: exec.branch,
       description: exec.description,
@@ -199,6 +311,10 @@ export async function status(input: StatusInput): Promise<StatusResult> {
       consecutiveNoProgress: exec.consecutiveNoProgress ?? 0,
       consecutiveErrors: exec.consecutiveErrors ?? 0,
       lastError: exec.lastError ?? null,
+      // Interrupt detection
+      isInterrupted: interrupted,
+      interruptReason,
+      worktreeDirty,
     });
   }
 
@@ -209,12 +325,14 @@ export async function status(input: StatusInput): Promise<StatusResult> {
   );
 
   // Calculate summary
+  const interruptedExecutions = executionStatuses.filter((e) => e.isInterrupted);
   const summary = {
     total: executionStatuses.length,
-    running: executionStatuses.filter((e) => e.status === "running").length,
+    running: executionStatuses.filter((e) => e.status === "running" && !e.isInterrupted).length,
     completed: executionStatuses.filter((e) => e.status === "completed").length,
     failed: executionStatuses.filter((e) => e.status === "failed").length,
     pending: executionStatuses.filter((e) => e.status === "pending").length,
+    interrupted: interruptedExecutions.length,
     atRisk: executionStatuses.filter(
       (e) => e.consecutiveNoProgress >= 2 || e.consecutiveErrors >= 3
     ).length,
@@ -228,6 +346,20 @@ export async function status(input: StatusInput): Promise<StatusResult> {
   // Only include reconciled if there were actions
   if (reconciled && reconciled.length > 0) {
     result.reconciled = reconciled;
+  }
+
+  // Generate suggestions for interrupted or failed executions
+  const suggestions: string[] = [];
+  for (const exec of executionStatuses) {
+    if (exec.status === "failed" || exec.isInterrupted) {
+      const hasWip = exec.worktreeDirty ? " (has uncommitted changes)" : "";
+      suggestions.push(
+        `ralph_retry("${exec.branch}") - Resume${hasWip}`
+      );
+    }
+  }
+  if (suggestions.length > 0) {
+    result.suggestions = suggestions;
   }
 
   return result;

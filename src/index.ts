@@ -388,7 +388,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_retry",
         description:
-          "Retry a failed PRD execution. Resets stagnation counters and generates a new agent prompt to continue from where it left off.",
+          "Retry a failed/interrupted PRD execution. Resets stagnation counters, handles uncommitted changes (WIP), and generates a new agent prompt to continue from where it left off.",
         annotations: {
           title: "Retry Execution",
           readOnlyHint: false,
@@ -402,6 +402,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             branch: {
               type: "string",
               description: "Branch name (e.g., ralph/task1-agent)",
+            },
+            wipPolicy: {
+              type: "string",
+              enum: ["stash", "commit", "keep"],
+              description: "How to handle uncommitted changes: stash (default), commit, or keep",
+              default: "stash",
             },
           },
           required: ["branch"],
