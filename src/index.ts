@@ -16,6 +16,8 @@ import { merge, mergeInputSchema, mergeQueueAction, mergeQueueInputSchema } from
 import { setAgentId, setAgentIdInputSchema } from "./tools/set-agent-id.js";
 import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-stagnation.js";
 import { retry, retryInputSchema } from "./tools/retry.js";
+import { doctor, doctorInputSchema } from "./tools/doctor.js";
+import { claimReady, claimReadyInputSchema } from "./tools/claim-ready.js";
 
 const server = new Server(
   {
@@ -110,7 +112,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             status: {
               type: "string",
-              enum: ["pending", "running", "completed", "failed", "stopped", "merging"],
+              enum: ["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"],
               description: "Filter by status",
             },
             reconcile: {
@@ -412,6 +414,54 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["branch"],
         },
       },
+      {
+        name: "ralph_doctor",
+        description:
+          "Run environment diagnostics. Checks git, node, pnpm, worktree support, and permissions. Run before ralph_start to catch issues early.",
+        annotations: {
+          title: "Environment Diagnostics",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            projectRoot: {
+              type: "string",
+              description: "Project root directory to check (defaults to cwd)",
+            },
+            verbose: {
+              type: "boolean",
+              description: "Include detailed version info and paths (default: false)",
+              default: false,
+            },
+          },
+        },
+      },
+      {
+        name: "ralph_claim_ready",
+        description:
+          "Atomically claim a ready PRD for execution. Used by Ralph Runner to safely pick up PRDs without race conditions. Returns agent prompt if successful.",
+        annotations: {
+          title: "Claim Ready PRD",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            branch: {
+              type: "string",
+              description: "Branch name of the PRD to claim (e.g., ralph/task1-agent)",
+            },
+          },
+          required: ["branch"],
+        },
+      },
     ],
   };
 });
@@ -456,6 +506,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "ralph_retry":
         result = await retry(retryInputSchema.parse(args));
+        break;
+      case "ralph_doctor":
+        result = await doctor(doctorInputSchema.parse(args || {}));
+        break;
+      case "ralph_claim_ready":
+        result = await claimReady(claimReadyInputSchema.parse(args));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

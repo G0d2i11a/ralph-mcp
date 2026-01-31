@@ -15,11 +15,35 @@ if (!existsSync(RALPH_DATA_DIR)) {
 
 export type ExecutionStatus =
   | "pending"
+  | "ready"      // Dependencies satisfied, waiting for Runner to pick up
+  | "starting"   // Runner claimed, Agent launching
   | "running"
   | "completed"
   | "failed"
   | "stopped"
   | "merging";
+
+/**
+ * Valid state transitions for ExecutionStatus.
+ * Key: current status, Value: array of valid next statuses
+ */
+export const VALID_TRANSITIONS: Record<ExecutionStatus, ExecutionStatus[]> = {
+  pending: ["ready", "running", "stopped", "failed"],           // ready when deps satisfied, running if no deps
+  ready: ["starting", "stopped", "failed", "pending"],          // starting when Runner claims, back to pending if deps change
+  starting: ["running", "ready", "failed", "stopped"],          // running when Agent starts, ready on launch failure (retry)
+  running: ["completed", "failed", "stopped", "merging"],       // normal execution flow
+  completed: ["merging"],                                        // only to merging
+  failed: ["running", "ready", "stopped"],                       // retry scenarios
+  stopped: [],                                                   // terminal state
+  merging: ["completed", "failed"],                              // merge result
+};
+
+/**
+ * Check if a status transition is valid.
+ */
+export function isValidTransition(from: ExecutionStatus, to: ExecutionStatus): boolean {
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
 
 export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 
@@ -43,6 +67,9 @@ export interface ExecutionRecord {
   consecutiveErrors: number; // Loops with repeated errors
   lastError: string | null; // Last error for comparison
   lastFilesChanged: number; // Files changed in last update
+  // Launch recovery fields (US-006)
+  launchAttemptAt: Date | null; // Last launch attempt timestamp
+  launchAttempts: number; // Number of launch attempts
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,7 +107,7 @@ export interface MergeQueueItem {
 
 interface StateFileV1 {
   version: 1;
-  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string }>;
+  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
 }
@@ -136,6 +163,9 @@ function deserializeState(file: StateFileV1): StateRuntime {
       consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
       lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
       lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
+      // Launch recovery defaults for backward compatibility (US-006)
+      launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
+      launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
       createdAt: parseDate(e.createdAt, "executions.createdAt"),
       updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
     })),
@@ -161,6 +191,7 @@ function serializeState(state: StateRuntime): StateFileV1 {
     version: 1,
     executions: state.executions.map((e) => ({
       ...e,
+      launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
       createdAt: toIso(e.createdAt),
       updatedAt: toIso(e.updatedAt),
     })),
