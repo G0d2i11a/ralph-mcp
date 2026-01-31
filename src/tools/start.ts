@@ -1,15 +1,11 @@
 import { z } from "zod";
-import { randomUUID } from "crypto";
 import { parsePrdFile } from "../utils/prd-parser.js";
-import { createWorktree } from "../utils/worktree.js";
 import { generateAgentPrompt } from "../utils/agent.js";
-import { resolve, basename } from "path";
+import { resolve } from "path";
 import {
   areDependenciesSatisfied,
-  findExecutionByBranch,
-  insertExecution,
-  insertUserStories,
 } from "../store/state.js";
+import { createExecutionFromPrd } from "../utils/execution.js";
 
 export const startInputSchema = z.object({
   prdPath: z.string().describe("Path to the PRD markdown file"),
@@ -26,6 +22,14 @@ export const startInputSchema = z.object({
     .string()
     .optional()
     .describe("Path to a file (e.g., CLAUDE.md) to inject into the agent prompt"),
+  ignoreDependencies: z
+    .boolean()
+    .default(false)
+    .describe("Skip dependency check and start even if dependencies are not satisfied"),
+  queueIfBlocked: z
+    .boolean()
+    .default(false)
+    .describe("If dependencies are not satisfied, create a pending execution instead of failing (default: false)"),
 });
 
 export type StartInput = z.infer<typeof startInputSchema>;
@@ -55,80 +59,35 @@ export async function start(input: StartInput): Promise<StartResult> {
   // Parse PRD file
   const prd = parsePrdFile(prdPath);
 
-  // Check if execution already exists for this branch
-  const existing = await findExecutionByBranch(prd.branchName);
+  // Check dependencies BEFORE creating worktree
+  const tempExec = { dependencies: prd.dependencies } as { dependencies: string[] };
+  const depStatus = await areDependenciesSatisfied(tempExec as any);
 
-  if (existing) {
+  const canStartNow = depStatus.satisfied || input.ignoreDependencies;
+
+  if (!canStartNow && !input.queueIfBlocked) {
     throw new Error(
-      `Execution already exists for branch ${prd.branchName}. Use ralph_get to check status or ralph_stop to stop it.`
+      `Cannot start: dependencies not satisfied. Pending: [${depStatus.pending.join(", ")}]. ` +
+      `Wait for these PRDs to complete, use queueIfBlocked: true to queue this PRD, ` +
+      `or use ignoreDependencies: true to force start.`
     );
   }
 
-  // Create worktree if requested
-  let worktreePath: string | null = null;
-  if (input.worktree) {
-    worktreePath = await createWorktree(projectRoot, prd.branchName);
-  }
-
-  // Create execution record
-  const executionId = randomUUID();
-  const now = new Date();
-  const projectName = basename(projectRoot);
-
-  await insertExecution({
-    id: executionId,
-    project: projectName,
-    branch: prd.branchName,
-    description: prd.description,
-    prdPath: prdPath,
-    projectRoot: projectRoot,
-    worktreePath: worktreePath,
-    status: "pending",
-    agentTaskId: null,
+  const created = await createExecutionFromPrd({
+    projectRoot,
+    prdPath,
+    prd,
+    worktree: input.worktree,
     onConflict: input.onConflict,
     autoMerge: input.autoMerge,
     notifyOnComplete: input.notifyOnComplete,
-    dependencies: prd.dependencies,
-    // Stagnation detection fields
-    loopCount: 0,
-    consecutiveNoProgress: 0,
-    consecutiveErrors: 0,
-    lastError: null,
-    lastFilesChanged: 0,
-    // Launch recovery fields
-    launchAttemptAt: null,
-    launchAttempts: 0,
-    createdAt: now,
-    updatedAt: now,
+    status: "pending",
   });
 
-  // Create user story records
-  const storyRecords = prd.userStories.map((story) => ({
-    id: `${executionId}:${story.id}`,
-    executionId: executionId,
-    storyId: story.id,
-    title: story.title,
-    description: story.description,
-    acceptanceCriteria: story.acceptanceCriteria,
-    priority: story.priority,
-    passes: false,
-    notes: "",
-    acEvidence: {},
-  }));
-
-  if (storyRecords.length > 0) {
-    await insertUserStories(storyRecords);
-  }
-
-  // Check if dependencies are satisfied
-  const tempExec = {
-    dependencies: prd.dependencies,
-  } as { dependencies: string[] };
-  const depStatus = await areDependenciesSatisfied(tempExec as any);
-
-  // Generate agent prompt only if auto-start AND dependencies are satisfied
+  // Generate agent prompt if auto-start is enabled and dependencies are satisfied
+  // (or ignoreDependencies=true).
   let agentPrompt: string | null = null;
-  if (input.autoStart && depStatus.satisfied) {
+  if (input.autoStart && canStartNow) {
     const contextPath = input.contextInjectionPath
       ? resolve(projectRoot, input.contextInjectionPath)
       : undefined;
@@ -136,34 +95,20 @@ export async function start(input: StartInput): Promise<StartResult> {
     agentPrompt = generateAgentPrompt(
       prd.branchName,
       prd.description,
-      worktreePath || projectRoot,
-      storyRecords.map((s) => ({
-        storyId: s.storyId,
-        title: s.title,
-        description: s.description,
-        acceptanceCriteria: s.acceptanceCriteria,
-        priority: s.priority,
-        passes: s.passes,
-      })),
+      created.worktreePath || projectRoot,
+      created.stories,
       contextPath
     );
   }
 
   return {
-    executionId,
+    executionId: created.executionId,
     branch: prd.branchName,
-    worktreePath,
+    worktreePath: created.worktreePath,
     agentPrompt,
     dependencies: prd.dependencies,
     dependenciesSatisfied: depStatus.satisfied,
     pendingDependencies: depStatus.pending,
-    stories: storyRecords.map((s) => ({
-      storyId: s.storyId,
-      title: s.title,
-      description: s.description,
-      acceptanceCriteria: s.acceptanceCriteria,
-      priority: s.priority,
-      passes: s.passes,
-    })),
+    stories: created.stories,
   };
 }

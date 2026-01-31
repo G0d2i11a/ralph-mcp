@@ -47,6 +47,20 @@ export function isValidTransition(from: ExecutionStatus, to: ExecutionStatus): b
 
 export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 
+/**
+ * Get a human-readable error message for invalid transitions.
+ */
+export function getTransitionError(
+  from: ExecutionStatus,
+  to: ExecutionStatus
+): string {
+  const validTargets = VALID_TRANSITIONS[from];
+  if (validTargets.length === 0) {
+    return `Cannot transition from '${from}' - it is a terminal state`;
+  }
+  return `Invalid transition from '${from}' to '${to}'. Valid transitions: ${validTargets.join(", ")}`;
+}
+
 export interface ExecutionRecord {
   id: string;
   project: string;
@@ -273,11 +287,20 @@ export async function insertExecution(execution: ExecutionRecord): Promise<void>
 
 export async function updateExecution(
   executionId: string,
-  patch: Partial<Omit<ExecutionRecord, "id" | "createdAt">> & { updatedAt?: Date }
+  patch: Partial<Omit<ExecutionRecord, "id" | "createdAt">> & { updatedAt?: Date },
+  options?: { skipTransitionValidation?: boolean }
 ): Promise<void> {
   return mutateState((s) => {
     const exec = s.executions.find((e) => e.id === executionId);
     if (!exec) throw new Error(`No execution found with id: ${executionId}`);
+
+    // Validate state transition if status is being changed
+    if (patch.status && patch.status !== exec.status && !options?.skipTransitionValidation) {
+      if (!isValidTransition(exec.status, patch.status)) {
+        throw new Error(getTransitionError(exec.status, patch.status));
+      }
+    }
+
     Object.assign(exec, patch);
   });
 }
