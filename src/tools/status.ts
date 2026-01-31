@@ -39,6 +39,7 @@ export interface ExecutionStatus {
   progress: string;
   completedStories: number;
   totalStories: number;
+  acProgress: string; // e.g., "15/20 AC passing"
   worktreePath: string | null;
   agentTaskId: string | null;
   lastActivity: string;
@@ -287,6 +288,16 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     const completedStories = stories.filter((s) => s.passes).length;
     const totalStories = stories.length;
 
+    // Calculate AC progress across all stories
+    let totalAc = 0;
+    let passingAc = 0;
+    for (const story of stories) {
+      totalAc += story.acceptanceCriteria.length;
+      const acEvidence = story.acEvidence || {};
+      passingAc += Object.values(acEvidence).filter((ev) => ev.passes).length;
+    }
+    const acProgress = totalAc > 0 ? `${passingAc}/${totalAc} AC` : "No AC";
+
     // Check interrupt status
     const { interrupted, reason: interruptReason } = isExecutionInterrupted(exec);
 
@@ -302,6 +313,7 @@ export async function status(input: StatusInput): Promise<StatusResult> {
       progress: `${completedStories}/${totalStories} US`,
       completedStories,
       totalStories,
+      acProgress,
       worktreePath: exec.worktreePath,
       agentTaskId: exec.agentTaskId,
       lastActivity: exec.updatedAt.toISOString(),
