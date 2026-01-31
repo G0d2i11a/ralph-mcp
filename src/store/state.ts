@@ -36,6 +36,13 @@ export interface ExecutionRecord {
   onConflict: ConflictStrategy | null;
   autoMerge: boolean;
   notifyOnComplete: boolean;
+  dependencies: string[]; // Branch names this execution depends on
+  // Stagnation detection fields
+  loopCount: number; // Total loop iterations
+  consecutiveNoProgress: number; // Loops with no file changes
+  consecutiveErrors: number; // Loops with repeated errors
+  lastError: string | null; // Last error for comparison
+  lastFilesChanged: number; // Files changed in last update
   createdAt: Date;
   updatedAt: Date;
 }
@@ -113,6 +120,13 @@ function deserializeState(file: StateFileV1): StateRuntime {
   return {
     executions: file.executions.map((e) => ({
       ...e,
+      dependencies: Array.isArray(e.dependencies) ? e.dependencies : [],
+      // Stagnation detection defaults for backward compatibility
+      loopCount: typeof (e as any).loopCount === "number" ? (e as any).loopCount : 0,
+      consecutiveNoProgress: typeof (e as any).consecutiveNoProgress === "number" ? (e as any).consecutiveNoProgress : 0,
+      consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
+      lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
+      lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
       createdAt: parseDate(e.createdAt, "executions.createdAt"),
       updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
     })),
@@ -300,5 +314,227 @@ export async function updateMergeQueueItem(
 export async function deleteMergeQueueByExecutionId(executionId: string): Promise<void> {
   return mutateState((s) => {
     s.mergeQueue = s.mergeQueue.filter((q) => q.executionId !== executionId);
+  });
+}
+
+/**
+ * Find all executions that depend on a given branch.
+ */
+export async function findExecutionsDependingOn(branch: string): Promise<ExecutionRecord[]> {
+  return readState((s) =>
+    s.executions.filter((e) => e.dependencies.includes(branch))
+  );
+}
+
+/**
+ * Check if all dependencies of an execution are completed.
+ */
+export async function areDependenciesSatisfied(execution: ExecutionRecord): Promise<{
+  satisfied: boolean;
+  pending: string[];
+  completed: string[];
+}> {
+  if (!execution.dependencies || execution.dependencies.length === 0) {
+    return { satisfied: true, pending: [], completed: [] };
+  }
+
+  return readState((s) => {
+    const pending: string[] = [];
+    const completed: string[] = [];
+
+    for (const depBranch of execution.dependencies) {
+      const depExec = s.executions.find((e) => e.branch === depBranch);
+      if (depExec && depExec.status === "completed") {
+        completed.push(depBranch);
+      } else {
+        pending.push(depBranch);
+      }
+    }
+
+    return {
+      satisfied: pending.length === 0,
+      pending,
+      completed,
+    };
+  });
+}
+
+// =============================================================================
+// STAGNATION DETECTION
+// =============================================================================
+
+/**
+ * Stagnation detection thresholds (matching original ralph-claude-code)
+ */
+export const STAGNATION_THRESHOLDS = {
+  NO_PROGRESS_THRESHOLD: 3, // Open circuit after 3 loops with no file changes
+  SAME_ERROR_THRESHOLD: 5, // Open circuit after 5 loops with repeated errors
+  MAX_LOOPS_PER_STORY: 10, // Safety limit per story
+};
+
+export type StagnationType = "no_progress" | "repeated_error" | "max_loops" | null;
+
+export interface StagnationCheckResult {
+  isStagnant: boolean;
+  type: StagnationType;
+  message: string;
+  metrics: {
+    loopCount: number;
+    consecutiveNoProgress: number;
+    consecutiveErrors: number;
+    lastError: string | null;
+  };
+}
+
+/**
+ * Check if an execution is stagnant (stuck in a loop).
+ */
+export async function checkStagnation(executionId: string): Promise<StagnationCheckResult> {
+  return readState((s) => {
+    const exec = s.executions.find((e) => e.id === executionId);
+    if (!exec) {
+      return {
+        isStagnant: false,
+        type: null,
+        message: "Execution not found",
+        metrics: { loopCount: 0, consecutiveNoProgress: 0, consecutiveErrors: 0, lastError: null },
+      };
+    }
+
+    const metrics = {
+      loopCount: exec.loopCount,
+      consecutiveNoProgress: exec.consecutiveNoProgress,
+      consecutiveErrors: exec.consecutiveErrors,
+      lastError: exec.lastError,
+    };
+
+    // Check no progress threshold
+    if (exec.consecutiveNoProgress >= STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD) {
+      return {
+        isStagnant: true,
+        type: "no_progress",
+        message: `No file changes for ${exec.consecutiveNoProgress} consecutive loops (threshold: ${STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD})`,
+        metrics,
+      };
+    }
+
+    // Check repeated error threshold
+    if (exec.consecutiveErrors >= STAGNATION_THRESHOLDS.SAME_ERROR_THRESHOLD) {
+      return {
+        isStagnant: true,
+        type: "repeated_error",
+        message: `Same error repeated ${exec.consecutiveErrors} times (threshold: ${STAGNATION_THRESHOLDS.SAME_ERROR_THRESHOLD}): ${exec.lastError?.slice(0, 100)}`,
+        metrics,
+      };
+    }
+
+    // Check max loops per story
+    const stories = s.userStories.filter((st) => st.executionId === executionId);
+    const pendingStories = stories.filter((st) => !st.passes);
+    if (pendingStories.length > 0 && exec.loopCount >= STAGNATION_THRESHOLDS.MAX_LOOPS_PER_STORY * pendingStories.length) {
+      return {
+        isStagnant: true,
+        type: "max_loops",
+        message: `Exceeded max loops (${exec.loopCount}) for ${pendingStories.length} pending stories`,
+        metrics,
+      };
+    }
+
+    return {
+      isStagnant: false,
+      type: null,
+      message: "OK",
+      metrics,
+    };
+  });
+}
+
+/**
+ * Record a loop result for stagnation tracking.
+ */
+export async function recordLoopResult(
+  executionId: string,
+  filesChanged: number,
+  error: string | null
+): Promise<StagnationCheckResult> {
+  return mutateState(async (s) => {
+    const exec = s.executions.find((e) => e.id === executionId);
+    if (!exec) {
+      throw new Error(`No execution found with id: ${executionId}`);
+    }
+
+    // Increment loop count
+    exec.loopCount++;
+    exec.lastFilesChanged = filesChanged;
+    exec.updatedAt = new Date();
+
+    // Track no progress
+    if (filesChanged === 0) {
+      exec.consecutiveNoProgress++;
+    } else {
+      exec.consecutiveNoProgress = 0;
+    }
+
+    // Track repeated errors
+    if (error) {
+      if (exec.lastError === error) {
+        exec.consecutiveErrors++;
+      } else {
+        exec.consecutiveErrors = 1;
+        exec.lastError = error;
+      }
+    } else {
+      exec.consecutiveErrors = 0;
+      exec.lastError = null;
+    }
+
+    // Check stagnation after recording
+    const metrics = {
+      loopCount: exec.loopCount,
+      consecutiveNoProgress: exec.consecutiveNoProgress,
+      consecutiveErrors: exec.consecutiveErrors,
+      lastError: exec.lastError,
+    };
+
+    if (exec.consecutiveNoProgress >= STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD) {
+      exec.status = "failed";
+      return {
+        isStagnant: true,
+        type: "no_progress" as StagnationType,
+        message: `Stagnation detected: No file changes for ${exec.consecutiveNoProgress} consecutive loops`,
+        metrics,
+      };
+    }
+
+    if (exec.consecutiveErrors >= STAGNATION_THRESHOLDS.SAME_ERROR_THRESHOLD) {
+      exec.status = "failed";
+      return {
+        isStagnant: true,
+        type: "repeated_error" as StagnationType,
+        message: `Stagnation detected: Same error repeated ${exec.consecutiveErrors} times`,
+        metrics,
+      };
+    }
+
+    return {
+      isStagnant: false,
+      type: null,
+      message: "OK",
+      metrics,
+    };
+  });
+}
+
+/**
+ * Reset stagnation counters (e.g., after manual intervention).
+ */
+export async function resetStagnation(executionId: string): Promise<void> {
+  return mutateState((s) => {
+    const exec = s.executions.find((e) => e.id === executionId);
+    if (!exec) throw new Error(`No execution found with id: ${executionId}`);
+    exec.consecutiveNoProgress = 0;
+    exec.consecutiveErrors = 0;
+    exec.lastError = null;
+    exec.updatedAt = new Date();
   });
 }

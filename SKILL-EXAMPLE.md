@@ -29,10 +29,13 @@ Claude: ralph_start → Task Agent handles everything
 | Tool | Purpose |
 |------|---------|
 | `ralph_start` | Start PRD execution (creates worktree + Task agent) |
+| `ralph_batch_start` | Start multiple PRDs with dependency resolution |
 | `ralph_status` | View all PRD execution status |
 | `ralph_get` | View single PRD detailed progress |
 | `ralph_merge` | Manual merge trigger (usually automatic) |
 | `ralph_stop` | Stop execution |
+| `ralph_retry` | Retry a failed execution |
+| `ralph_reset_stagnation` | Reset stagnation counters after manual fix |
 
 ## Parallel Execution
 

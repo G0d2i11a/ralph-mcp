@@ -22,6 +22,11 @@ export interface ExecutionStatus {
   agentTaskId: string | null;
   lastActivity: string;
   createdAt: string;
+  // Stagnation metrics
+  loopCount: number;
+  consecutiveNoProgress: number;
+  consecutiveErrors: number;
+  lastError: string | null;
 }
 
 export interface StatusResult {
@@ -32,6 +37,7 @@ export interface StatusResult {
     completed: number;
     failed: number;
     pending: number;
+    atRisk: number; // Executions approaching stagnation threshold
   };
 }
 
@@ -67,6 +73,11 @@ export async function status(input: StatusInput): Promise<StatusResult> {
       agentTaskId: exec.agentTaskId,
       lastActivity: exec.updatedAt.toISOString(),
       createdAt: exec.createdAt.toISOString(),
+      // Stagnation metrics
+      loopCount: exec.loopCount ?? 0,
+      consecutiveNoProgress: exec.consecutiveNoProgress ?? 0,
+      consecutiveErrors: exec.consecutiveErrors ?? 0,
+      lastError: exec.lastError ?? null,
     });
   }
 
@@ -83,6 +94,9 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     completed: executionStatuses.filter((e) => e.status === "completed").length,
     failed: executionStatuses.filter((e) => e.status === "failed").length,
     pending: executionStatuses.filter((e) => e.status === "pending").length,
+    atRisk: executionStatuses.filter(
+      (e) => e.consecutiveNoProgress >= 2 || e.consecutiveErrors >= 3
+    ).length,
   };
 
   return {

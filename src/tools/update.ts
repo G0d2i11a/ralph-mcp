@@ -1,25 +1,31 @@
 import { z } from "zod";
 import notifier from "node-notifier";
-import { appendFile, mkdir } from "fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import {
+  areDependenciesSatisfied,
   findExecutionByBranch,
+  findExecutionsDependingOn,
   findMergeQueueItemByExecutionId,
   findUserStoryById,
   insertMergeQueueItem,
   listMergeQueue,
   listUserStoriesByExecutionId,
+  recordLoopResult,
   updateExecution,
   updateUserStory,
 } from "../store/state.js";
 import { mergeQueueAction } from "./merge.js";
+import { generateAgentPrompt } from "../utils/agent.js";
 
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
   storyId: z.string().describe("Story ID (e.g., US-001)"),
   passes: z.boolean().describe("Whether the story passes"),
   notes: z.string().optional().describe("Implementation notes"),
+  filesChanged: z.number().optional().describe("Number of files changed (for stagnation detection)"),
+  error: z.string().optional().describe("Error message if stuck (for stagnation detection)"),
 });
 
 export type UpdateInput = z.infer<typeof updateInputSchema>;
@@ -32,6 +38,15 @@ export interface UpdateResult {
   allComplete: boolean;
   progress: string;
   addedToMergeQueue: boolean;
+  triggeredDependents: Array<{
+    branch: string;
+    agentPrompt: string | null;
+  }>;
+  stagnation?: {
+    isStagnant: boolean;
+    type: string | null;
+    message: string;
+  };
 }
 
 function formatDate(date: Date): string {
@@ -42,6 +57,59 @@ function formatDate(date: Date): string {
   const HH = pad(date.getHours());
   const mm = pad(date.getMinutes());
   return `${yyyy}-${MM}-${dd} ${HH}:${mm}`;
+}
+
+/**
+ * Extract Codebase Pattern from notes if present.
+ * Looks for "**Codebase Pattern:**" section in the notes.
+ */
+function extractCodebasePattern(notes: string): string | null {
+  const match = notes.match(/\*\*Codebase Pattern:\*\*\s*(.+?)(?=\n\*\*|\n##|$)/is);
+  if (match && match[1].trim()) {
+    return match[1].trim();
+  }
+  return null;
+}
+
+/**
+ * Update the Codebase Patterns section at the top of ralph-progress.md.
+ * Creates the section if it doesn't exist.
+ */
+async function updateCodebasePatterns(progressPath: string, newPattern: string): Promise<void> {
+  let content = "";
+  if (existsSync(progressPath)) {
+    content = await readFile(progressPath, "utf-8");
+  }
+
+  const patternsSectionHeader = "## Codebase Patterns\n";
+  const patternLine = `- ${newPattern}\n`;
+
+  if (content.includes(patternsSectionHeader)) {
+    // Find the end of the Codebase Patterns section (next ## or end of patterns)
+    const sectionStart = content.indexOf(patternsSectionHeader);
+    const sectionContentStart = sectionStart + patternsSectionHeader.length;
+
+    // Find next section (## that's not Codebase Patterns)
+    const nextSectionMatch = content.slice(sectionContentStart).match(/\n## /);
+    const sectionEnd = nextSectionMatch
+      ? sectionContentStart + nextSectionMatch.index!
+      : content.length;
+
+    // Check if pattern already exists (avoid duplicates)
+    const existingPatterns = content.slice(sectionContentStart, sectionEnd);
+    if (!existingPatterns.includes(newPattern)) {
+      // Insert new pattern at the end of the patterns section
+      const before = content.slice(0, sectionEnd);
+      const after = content.slice(sectionEnd);
+      content = before + patternLine + after;
+      await writeFile(progressPath, content, "utf-8");
+    }
+  } else {
+    // Create new Codebase Patterns section at the top
+    const newSection = patternsSectionHeader + patternLine + "\n";
+    content = newSection + content;
+    await writeFile(progressPath, content, "utf-8");
+  }
 }
 
 export async function update(input: UpdateInput): Promise<UpdateResult> {
@@ -62,6 +130,30 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     );
   }
 
+  // Record loop result for stagnation detection
+  const filesChanged = input.filesChanged ?? 0;
+  const error = input.error ?? null;
+  const stagnationResult = await recordLoopResult(exec.id, filesChanged, error);
+
+  // If stagnant, mark execution as failed and return early
+  if (stagnationResult.isStagnant) {
+    return {
+      success: false,
+      branch: input.branch,
+      storyId: input.storyId,
+      passes: false,
+      allComplete: false,
+      progress: `Stagnation detected`,
+      addedToMergeQueue: false,
+      triggeredDependents: [],
+      stagnation: {
+        isStagnant: true,
+        type: stagnationResult.type,
+        message: stagnationResult.message,
+      },
+    };
+  }
+
   // Update story
   await updateUserStory(storyKey, {
     passes: input.passes,
@@ -73,7 +165,7 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     try {
       const progressPath = join(exec.worktreePath, "ralph-progress.md");
       const dir = dirname(progressPath);
-      
+
       if (!existsSync(dir)) {
         await mkdir(dir, { recursive: true });
       }
@@ -81,7 +173,13 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       const timestamp = formatDate(new Date());
       const notesContent = input.notes || story.notes || "No notes provided.";
       const entry = `## [${timestamp}] ${story.storyId}: ${story.title}\n${notesContent}\n\n`;
-      
+
+      // Extract and consolidate Codebase Pattern if present
+      const pattern = extractCodebasePattern(notesContent);
+      if (pattern) {
+        await updateCodebasePatterns(progressPath, pattern);
+      }
+
       await appendFile(progressPath, entry, "utf-8");
     } catch (e) {
       console.error("Failed to write to ralph-progress.md:", e);
@@ -142,6 +240,48 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     });
   }
 
+  // Trigger dependent executions when this PRD completes
+  const triggeredDependents: Array<{ branch: string; agentPrompt: string | null }> = [];
+  if (allComplete) {
+    const dependents = await findExecutionsDependingOn(exec.branch);
+
+    for (const dep of dependents) {
+      // Skip if already running or completed
+      if (dep.status !== "pending") {
+        continue;
+      }
+
+      // Check if all dependencies are now satisfied
+      const depStatus = await areDependenciesSatisfied(dep);
+
+      if (depStatus.satisfied) {
+        // Get user stories for this dependent execution
+        const depStories = await listUserStoriesByExecutionId(dep.id);
+
+        // Generate agent prompt for the dependent
+        const agentPrompt = generateAgentPrompt(
+          dep.branch,
+          dep.description,
+          dep.worktreePath || dep.projectRoot,
+          depStories.map((s) => ({
+            storyId: s.storyId,
+            title: s.title,
+            description: s.description,
+            acceptanceCriteria: s.acceptanceCriteria,
+            priority: s.priority,
+            passes: s.passes,
+          })),
+          undefined // contextPath not stored, would need to re-parse PRD if needed
+        );
+
+        triggeredDependents.push({
+          branch: dep.branch,
+          agentPrompt,
+        });
+      }
+    }
+  }
+
   return {
     success: true,
     branch: input.branch,
@@ -150,5 +290,6 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     allComplete,
     progress: `${completedCount}/${allStories.length} US`,
     addedToMergeQueue,
+    triggeredDependents,
   };
 }

@@ -20,7 +20,13 @@ export function generateAgentPrompt(
     priority: number;
     passes: boolean;
   }>,
-  contextInjectionPath?: string
+  contextInjectionPath?: string,
+  loopContext?: {
+    loopCount: number;
+    consecutiveNoProgress: number;
+    consecutiveErrors: number;
+    lastError: string | null;
+  }
 ): string {
   const pendingStories = stories
     .filter((s) => !s.passes)
@@ -29,6 +35,9 @@ export function generateAgentPrompt(
   if (pendingStories.length === 0) {
     return "All user stories are complete. No action needed.";
   }
+
+  const completedCount = stories.filter((s) => s.passes).length;
+  const totalCount = stories.length;
 
   const storiesText = pendingStories
     .map(
@@ -53,6 +62,17 @@ ${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
     }
   }
 
+  // Read knowledge base if it exists (Long-term memory)
+  let knowledgeBase = "";
+  const knowledgePath = join(worktreePath, "knowledge.md");
+  if (existsSync(knowledgePath)) {
+    try {
+      knowledgeBase = readFileSync(knowledgePath, "utf-8");
+    } catch (e) {
+      // Ignore read errors
+    }
+  }
+
   // Read injected context if provided
   let injectedContext = "";
   if (contextInjectionPath && existsSync(contextInjectionPath)) {
@@ -63,6 +83,17 @@ ${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
     }
   }
 
+  // Build loop context warning if stagnation is approaching
+  let loopWarning = "";
+  if (loopContext) {
+    if (loopContext.consecutiveNoProgress >= 2) {
+      loopWarning = `\n⚠️ **WARNING**: No file changes detected for ${loopContext.consecutiveNoProgress} consecutive updates. If stuck, try a different approach or mark the story as blocked.\n`;
+    }
+    if (loopContext.consecutiveErrors >= 3) {
+      loopWarning += `\n⚠️ **WARNING**: Same error repeated ${loopContext.consecutiveErrors} times. Consider a different approach.\nLast error: ${loopContext.lastError?.slice(0, 200)}\n`;
+    }
+  }
+
   return `You are an autonomous coding agent working on the "${branch}" branch.
 
 ## Working Directory
@@ -70,6 +101,12 @@ ${worktreePath}
 
 ## PRD: ${description}
 
+## Progress
+- Completed: ${completedCount}/${totalCount} stories
+- Current story: ${pendingStories[0].storyId}
+${loopContext ? `- Loop iteration: ${loopContext.loopCount}` : ""}
+${loopWarning}
+${knowledgeBase ? `## Knowledge Base (Long-term Memory)\n${knowledgeBase}\n` : ""}
 ${injectedContext ? `## Project Context\n${injectedContext}\n` : ""}
 
 ${progressLog ? `## Progress & Learnings\n${progressLog}\n` : ""}
@@ -77,21 +114,74 @@ ${progressLog ? `## Progress & Learnings\n${progressLog}\n` : ""}
 ## Pending User Stories
 ${storiesText}
 
+## Story Size Check (CRITICAL)
+
+Before implementing, verify the story is small enough to complete in ONE context window.
+
+**Right-sized stories:**
+- Add a database column and migration
+- Add a UI component to an existing page
+- Update a server action with new logic
+- Add a filter dropdown to a list
+
+**Too big (should have been split):**
+- "Build the entire dashboard" → schema, queries, UI components, filters
+- "Add authentication" → schema, middleware, login UI, session handling
+- "Refactor the API" → one story per endpoint
+
+**If a story seems too big:** Complete what you can, commit it, then call \`ralph_update\` with \`passes: false\` and notes explaining what remains. Do NOT produce broken code trying to finish everything.
+
 ## Instructions
 
 1. Work on ONE user story at a time, starting with the highest priority.
-2. ${progressLog ? "Review the 'Progress & Learnings' section above to understand previous decisions and context." : "Check if 'ralph-progress.md' exists and review it for context."}
+2. ${progressLog ? "Review the 'Progress & Learnings' section above - especially the 'Codebase Patterns' section at the top." : "Check if 'ralph-progress.md' exists and review it for context."}
 3. Implement the feature to satisfy all acceptance criteria.
-4. Run quality checks: \`pnpm check-types\` and \`pnpm --filter api build\` (adjust command for the specific repo structure if needed).
-5. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
-6. After completing a story, call \`ralph_update\` to mark it as passed:
-   \`ralph_update({ branch: "${branch}", storyId: "${pendingStories[0].storyId}", passes: true, notes: "Brief summary of implementation, key decisions, and any learnings." })\`
-7. Continue to the next story until all are complete.
+4. Run quality checks: \`pnpm check-types\` and \`pnpm --filter api build\` (adjust for repo structure).
+5. **Testing**: Run relevant tests. For UI changes, run component tests if available. If no browser tools are available, note "Manual UI verification needed" in your update notes.
+6. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
+7. **Update Directory CLAUDE.md**: If you discovered reusable patterns, add them to the CLAUDE.md in the directory you modified (create if needed). Only add genuinely reusable knowledge, not story-specific details.
+8. Call \`ralph_update\` with structured status. Include:
+   - \`passes: true\` if story is complete, \`passes: false\` if blocked/incomplete
+   - \`filesChanged\`: number of files modified (for stagnation detection)
+   - \`error\`: error message if stuck (for stagnation detection)
+   - \`notes\`: detailed implementation notes
 
-## Quality Requirements
-- ALL commits must pass typecheck and build
+   Example:
+   \`\`\`
+   ralph_update({
+     branch: "${branch}",
+     storyId: "${pendingStories[0].storyId}",
+     passes: true,
+     filesChanged: 5,
+     notes: "**Implemented:** ... **Files changed:** ... **Learnings:** ..."
+   })
+   \`\`\`
+9. Continue to the next story until all are complete.
+
+## Notes Format for ralph_update
+
+Provide structured learnings in the \`notes\` field:
+\`\`\`
+**Implemented:** Brief summary of what was done
+**Files changed:** List key files
+**Learnings:**
+- Patterns discovered (e.g., "this codebase uses X for Y")
+- Gotchas encountered (e.g., "don't forget to update Z when changing W")
+- Useful context for future iterations
+**Codebase Pattern:** (if discovered a general pattern worth consolidating)
+\`\`\`
+
+## Quality Requirements (Feedback Loops)
+- ALL commits must pass typecheck and build - broken code compounds across iterations
+- Run relevant tests before committing
 - Keep changes focused and minimal
 - Follow existing code patterns
+- Do NOT commit broken code - if checks fail, fix before committing
+
+## Stagnation Prevention
+- If you're stuck on the same error 3+ times, try a different approach
+- If no files are changing, you may be in a loop - step back and reassess
+- It's OK to mark a story as \`passes: false\` with notes explaining the blocker
 
 ## Stop Condition
 When all stories are complete, report completion.

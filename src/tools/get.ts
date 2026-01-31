@@ -39,6 +39,14 @@ export interface GetResult {
     total: number;
     percentage: number;
   };
+  stagnation: {
+    loopCount: number;
+    consecutiveNoProgress: number;
+    consecutiveErrors: number;
+    lastError: string | null;
+    isAtRisk: boolean;
+    riskReason: string | null;
+  };
 }
 
 export async function get(input: GetInput): Promise<GetResult> {
@@ -57,6 +65,23 @@ export async function get(input: GetInput): Promise<GetResult> {
 
   const completed = stories.filter((s) => s.passes).length;
   const total = stories.length;
+
+  // Calculate stagnation risk
+  const loopCount = exec.loopCount ?? 0;
+  const consecutiveNoProgress = exec.consecutiveNoProgress ?? 0;
+  const consecutiveErrors = exec.consecutiveErrors ?? 0;
+  const lastError = exec.lastError ?? null;
+
+  let isAtRisk = false;
+  let riskReason: string | null = null;
+
+  if (consecutiveNoProgress >= 2) {
+    isAtRisk = true;
+    riskReason = `No file changes for ${consecutiveNoProgress} consecutive updates (threshold: 3)`;
+  } else if (consecutiveErrors >= 3) {
+    isAtRisk = true;
+    riskReason = `Same error repeated ${consecutiveErrors} times (threshold: 5)`;
+  }
 
   return {
     execution: {
@@ -86,6 +111,14 @@ export async function get(input: GetInput): Promise<GetResult> {
       completed,
       total,
       percentage: total > 0 ? Math.round((completed / total) * 100) : 0,
+    },
+    stagnation: {
+      loopCount,
+      consecutiveNoProgress,
+      consecutiveErrors,
+      lastError,
+      isAtRisk,
+      riskReason,
     },
   };
 }

@@ -7,12 +7,15 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { start, startInputSchema } from "./tools/start.js";
+import { batchStart, batchStartInputSchema } from "./tools/batch-start.js";
 import { status, statusInputSchema } from "./tools/status.js";
 import { get, getInputSchema } from "./tools/get.js";
 import { update, updateInputSchema } from "./tools/update.js";
 import { stop, stopInputSchema } from "./tools/stop.js";
 import { merge, mergeInputSchema, mergeQueueAction, mergeQueueInputSchema } from "./tools/merge.js";
 import { setAgentId, setAgentIdInputSchema } from "./tools/set-agent-id.js";
+import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-stagnation.js";
+import { retry, retryInputSchema } from "./tools/retry.js";
 
 const server = new Server(
   {
@@ -131,6 +134,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Implementation notes",
             },
+            filesChanged: {
+              type: "number",
+              description: "Number of files changed (for stagnation detection)",
+            },
+            error: {
+              type: "string",
+              description: "Error message if stuck (for stagnation detection)",
+            },
           },
           required: ["branch", "storyId", "passes"],
         },
@@ -223,6 +234,91 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["branch", "agentTaskId"],
         },
       },
+      {
+        name: "ralph_batch_start",
+        description:
+          "Start multiple PRDs with dependency resolution. Parses all PRDs, creates worktrees, runs pnpm install serially (avoids store lock), and returns agent prompts for PRDs whose dependencies are satisfied.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            prdPaths: {
+              type: "array",
+              items: { type: "string" },
+              description: "Array of paths to PRD markdown files",
+            },
+            projectRoot: {
+              type: "string",
+              description: "Project root directory (defaults to cwd)",
+            },
+            worktree: {
+              type: "boolean",
+              description: "Create worktrees for isolation (default: true)",
+              default: true,
+            },
+            autoMerge: {
+              type: "boolean",
+              description: "Auto add to merge queue when all stories pass (default: true)",
+              default: true,
+            },
+            notifyOnComplete: {
+              type: "boolean",
+              description: "Show Windows notification when all stories complete (default: true)",
+              default: true,
+            },
+            onConflict: {
+              type: "string",
+              enum: ["auto_theirs", "auto_ours", "notify", "agent"],
+              description: "Conflict resolution strategy for merge (default: agent)",
+              default: "agent",
+            },
+            contextInjectionPath: {
+              type: "string",
+              description: "Path to a file (e.g., CLAUDE.md) to inject into the agent prompt",
+            },
+            preheat: {
+              type: "boolean",
+              description: "Run pnpm install serially before starting agents (default: true)",
+              default: true,
+            },
+          },
+          required: ["prdPaths"],
+        },
+      },
+      {
+        name: "ralph_reset_stagnation",
+        description:
+          "Reset stagnation counters for an execution. Use after manual intervention to allow the agent to continue.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            branch: {
+              type: "string",
+              description: "Branch name (e.g., ralph/task1-agent)",
+            },
+            resumeExecution: {
+              type: "boolean",
+              description: "Also set status back to 'running' if currently 'failed' (default: true)",
+              default: true,
+            },
+          },
+          required: ["branch"],
+        },
+      },
+      {
+        name: "ralph_retry",
+        description:
+          "Retry a failed PRD execution. Resets stagnation counters and generates a new agent prompt to continue from where it left off.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            branch: {
+              type: "string",
+              description: "Branch name (e.g., ralph/task1-agent)",
+            },
+          },
+          required: ["branch"],
+        },
+      },
     ],
   };
 });
@@ -258,6 +354,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "ralph_set_agent_id":
         result = await setAgentId(setAgentIdInputSchema.parse(args));
+        break;
+      case "ralph_batch_start":
+        result = await batchStart(batchStartInputSchema.parse(args));
+        break;
+      case "ralph_reset_stagnation":
+        result = await resetStagnationTool(resetStagnationInputSchema.parse(args));
+        break;
+      case "ralph_retry":
+        result = await retry(retryInputSchema.parse(args));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

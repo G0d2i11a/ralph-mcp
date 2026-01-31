@@ -14,6 +14,7 @@ export interface ParsedPrd {
   description: string;
   branchName: string;
   userStories: ParsedUserStory[];
+  dependencies: string[]; // Branch names this PRD depends on
 }
 
 /**
@@ -46,6 +47,7 @@ function parsePrdJson(content: string): ParsedPrd {
         priority: (us.priority as number) || index + 1,
       })
     ),
+    dependencies: Array.isArray(data.dependencies) ? data.dependencies : [],
   };
 }
 
@@ -70,6 +72,9 @@ function parsePrdMarkdown(content: string): ParsedPrd {
   );
   const description = descMatch?.[1]?.trim() || title;
 
+  // Extract dependencies from frontmatter or body
+  const dependencies = extractDependencies(frontmatter, body);
+
   // Extract user stories
   const userStories = extractUserStories(body);
 
@@ -78,7 +83,67 @@ function parsePrdMarkdown(content: string): ParsedPrd {
     description,
     branchName,
     userStories,
+    dependencies,
   };
+}
+
+/**
+ * Extract dependencies from frontmatter or body.
+ * Supports:
+ * - Frontmatter: `dependencies: [ralph/prd-a, ralph/prd-b]`
+ * - Body section: `## Dependencies\n- depends_on: prd-a.md`
+ */
+function extractDependencies(frontmatter: Record<string, unknown>, body: string): string[] {
+  const deps: string[] = [];
+
+  // From frontmatter (array of branch names)
+  if (Array.isArray(frontmatter.dependencies)) {
+    for (const dep of frontmatter.dependencies) {
+      if (typeof dep === "string" && dep.trim()) {
+        deps.push(normalizeDependency(dep.trim()));
+      }
+    }
+  }
+
+  // From body: ## Dependencies section
+  const depsSection = body.match(
+    /##\s*(?:Dependencies|依赖)\s*\n([\s\S]*?)(?=\n##[^#]|$)/i
+  );
+  if (depsSection) {
+    // Match patterns like:
+    // - depends_on: prd-shared-logic.md
+    // - ralph/prd-shared-logic
+    // - prd-shared-logic
+    const depPattern = /[-*]\s*(?:depends_on:\s*)?(.+?)(?:\n|$)/gi;
+    let match;
+    while ((match = depPattern.exec(depsSection[1])) !== null) {
+      const dep = match[1].trim();
+      if (dep && !dep.startsWith("#")) {
+        deps.push(normalizeDependency(dep));
+      }
+    }
+  }
+
+  return [...new Set(deps)]; // Deduplicate
+}
+
+/**
+ * Normalize dependency to branch name format.
+ * - "prd-shared-logic.md" -> "ralph/prd-shared-logic"
+ * - "ralph/prd-shared-logic" -> "ralph/prd-shared-logic"
+ * - "prd-shared-logic" -> "ralph/prd-shared-logic"
+ */
+function normalizeDependency(dep: string): string {
+  // Remove .md extension if present
+  dep = dep.replace(/\.md$/i, "");
+
+  // If already has ralph/ prefix, return as-is
+  if (dep.startsWith("ralph/")) {
+    return dep;
+  }
+
+  // Add ralph/ prefix
+  return `ralph/${dep}`;
 }
 
 function extractUserStories(content: string): ParsedUserStory[] {

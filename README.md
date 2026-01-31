@@ -39,12 +39,41 @@ Claude: ralph_start → Task Agent handles everything automatically
 - **2-Step Workflow** - Just create PRD and run `ralph_start`, everything else is automatic
 - **Parallel Execution** - Run 5+ PRDs simultaneously with Claude Code Task tool
 - **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
+- **Dependency Management** - PRDs can depend on other PRDs, auto-triggered when dependencies complete
+- **Stagnation Detection** - Auto-detects stuck agents (no progress, repeated errors) and marks as failed
 - **Agent Memory** - Persistent "Progress Log" learns from mistakes across User Stories
 - **Context Injection** - Inject project rules (CLAUDE.md) into agent context
 - **Auto Quality Gates** - Type check, lint, build before every commit
 - **Auto Merge** - Merges to main when all User Stories pass
-- **Doc Sync** - Automatically updates TODO.md with completed items
+- **Merge Queue** - Serial merge queue to avoid conflicts
 - **Notifications** - Windows Toast when PRD completes
+
+## Progress Log (Agent Memory)
+
+Ralph maintains a `ralph-progress.md` file in each worktree that persists learnings across User Stories. This gives agents "memory" of what worked and what didn't.
+
+### How it works
+
+1. When an agent completes a User Story, it records learnings in the `notes` field of `ralph_update`
+2. Ralph appends these notes to `ralph-progress.md` in the worktree
+3. When the next User Story starts, the agent receives this log in its prompt
+4. The file is automatically git-ignored (via `.git/info/exclude`)
+
+### Example progress log
+
+```markdown
+## [2024-01-15 14:30] US-001: Setup Database Schema
+- Used Prisma with PostgreSQL
+- Added index on `userId` for faster queries
+- Note: Must run `pnpm db:migrate:dev` after schema changes
+
+## [2024-01-15 15:45] US-002: User Registration API
+- Reused validation patterns from existing auth module
+- BCrypt rounds set to 12 for password hashing
+- Integration test requires test database to be running
+```
+
+This allows later stories to benefit from earlier discoveries without re-learning.
 
 ## Installation
 
@@ -128,6 +157,7 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 | Tool | Description |
 |------|-------------|
 | `ralph_start` | Start PRD execution (parse PRD, create worktree, return agent prompt) |
+| `ralph_batch_start` | Start multiple PRDs with dependency resolution |
 | `ralph_status` | View all PRD execution status |
 | `ralph_get` | Get single PRD details |
 | `ralph_update` | Update User Story status (called by agent) |
@@ -135,6 +165,8 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 | `ralph_merge` | Merge to main + cleanup worktree |
 | `ralph_merge_queue` | Manage serial merge queue |
 | `ralph_set_agent_id` | Record Task agent ID |
+| `ralph_retry` | Retry a failed PRD execution |
+| `ralph_reset_stagnation` | Reset stagnation counters after manual intervention |
 
 ## Usage
 
@@ -193,6 +225,9 @@ ralph_merge({ branch: "ralph/prd-feature" })
 // Start PRD execution (returns agent prompt)
 ralph_start({ prdPath: "tasks/prd-feature.md" })
 
+// Start multiple PRDs in parallel
+ralph_batch_start({ prdPaths: ["tasks/prd-a.md", "tasks/prd-b.md"] })
+
 // View all PRD status
 ralph_status()
 
@@ -210,6 +245,12 @@ ralph_merge({ branch: "ralph/prd-feature" })
 
 // Record Task agent ID (for tracking)
 ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
+
+// Retry a failed execution
+ralph_retry({ branch: "ralph/prd-feature" })
+
+// Reset stagnation counters (after manual fix)
+ralph_reset_stagnation({ branch: "ralph/prd-feature" })
 ```
 
 ## PRD Format
@@ -289,6 +330,60 @@ ralph_start({
   notifyOnComplete: true,    // Windows Toast notification
   onConflict: "auto_theirs"  // Prefer main on conflicts
 })
+```
+
+### ralph_batch_start options
+
+Start multiple PRDs with dependency resolution and serial `pnpm install`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `prdPaths` | required | Array of paths to PRD markdown files |
+| `projectRoot` | cwd | Project root directory |
+| `worktree` | `true` | Create worktrees for isolation |
+| `autoMerge` | `true` | Auto add to merge queue when all stories pass |
+| `notifyOnComplete` | `true` | Show Windows notification on completion |
+| `onConflict` | `"agent"` | Conflict resolution strategy |
+| `contextInjectionPath` | `undefined` | Path to file (e.g. CLAUDE.md) to inject into prompt |
+| `preheat` | `true` | Run pnpm install serially before starting agents |
+
+```javascript
+ralph_batch_start({
+  prdPaths: [
+    "tasks/prd-auth.md",
+    "tasks/prd-dashboard.md",
+    "tasks/prd-settings.md"
+  ],
+  contextInjectionPath: "CLAUDE.md",
+  autoMerge: true
+})
+```
+
+### ralph_retry
+
+Retry a failed PRD execution. Resets stagnation counters and generates a new agent prompt to continue from where it left off.
+
+```javascript
+// Retry a failed execution
+ralph_retry({ branch: "ralph/prd-feature" })
+// Returns: { success, branch, message, previousStatus, agentPrompt, progress }
+```
+
+### ralph_reset_stagnation
+
+Reset stagnation counters after manual intervention. Use when you've fixed an issue and want the agent to continue.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `branch` | required | Branch name |
+| `resumeExecution` | `true` | Also set status back to 'running' if currently 'failed' |
+
+```javascript
+// Reset counters and resume
+ralph_reset_stagnation({ branch: "ralph/prd-feature" })
+
+// Reset counters only (keep failed status)
+ralph_reset_stagnation({ branch: "ralph/prd-feature", resumeExecution: false })
 ```
 
 ## Credits

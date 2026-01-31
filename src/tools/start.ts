@@ -5,6 +5,7 @@ import { createWorktree } from "../utils/worktree.js";
 import { generateAgentPrompt } from "../utils/agent.js";
 import { resolve, basename } from "path";
 import {
+  areDependenciesSatisfied,
   findExecutionByBranch,
   insertExecution,
   insertUserStories,
@@ -34,6 +35,9 @@ export interface StartResult {
   branch: string;
   worktreePath: string | null;
   agentPrompt: string | null;
+  dependencies: string[];
+  dependenciesSatisfied: boolean;
+  pendingDependencies: string[];
   stories: Array<{
     storyId: string;
     title: string;
@@ -84,6 +88,13 @@ export async function start(input: StartInput): Promise<StartResult> {
     onConflict: input.onConflict,
     autoMerge: input.autoMerge,
     notifyOnComplete: input.notifyOnComplete,
+    dependencies: prd.dependencies,
+    // Stagnation detection fields
+    loopCount: 0,
+    consecutiveNoProgress: 0,
+    consecutiveErrors: 0,
+    lastError: null,
+    lastFilesChanged: 0,
     createdAt: now,
     updatedAt: now,
   });
@@ -105,9 +116,15 @@ export async function start(input: StartInput): Promise<StartResult> {
     await insertUserStories(storyRecords);
   }
 
-  // Generate agent prompt if auto-start
+  // Check if dependencies are satisfied
+  const tempExec = {
+    dependencies: prd.dependencies,
+  } as { dependencies: string[] };
+  const depStatus = await areDependenciesSatisfied(tempExec as any);
+
+  // Generate agent prompt only if auto-start AND dependencies are satisfied
   let agentPrompt: string | null = null;
-  if (input.autoStart) {
+  if (input.autoStart && depStatus.satisfied) {
     const contextPath = input.contextInjectionPath
       ? resolve(projectRoot, input.contextInjectionPath)
       : undefined;
@@ -133,6 +150,9 @@ export async function start(input: StartInput): Promise<StartResult> {
     branch: prd.branchName,
     worktreePath,
     agentPrompt,
+    dependencies: prd.dependencies,
+    dependenciesSatisfied: depStatus.satisfied,
+    pendingDependencies: depStatus.pending,
     stories: storyRecords.map((s) => ({
       storyId: s.storyId,
       title: s.title,
