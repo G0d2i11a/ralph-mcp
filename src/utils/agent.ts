@@ -219,6 +219,11 @@ Provide structured learnings in the \`notes\` field:
   - \`pnpm check-types\` must pass (provide typecheckPassed: true)
   - \`pnpm build\` must pass (provide buildPassed: true)
   - Each AC must have evidence (command output, file paths, test results)
+- **SCOPE GUARDRAILS (prevents scope creep):**
+  - Warn threshold: >1500 lines or >15 files → must provide scopeExplanation
+  - Hard threshold: >3000 lines or >25 files → story rejected, must split
+  - scopeExplanation format: \`[{ file: "path/to/file.ts", reason: "why in scope", lines: 123 }]\`
+  - Excluded from count: lock files, snapshots, dist/, build/, .next/
 - ALL commits must pass typecheck and build - broken code compounds across iterations
 - Run relevant tests before committing
 - Keep changes focused and minimal

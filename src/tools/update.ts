@@ -3,6 +3,8 @@ import notifier from "node-notifier";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join, dirname, resolve } from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
 import {
   areDependenciesSatisfied,
   findExecutionByBranch,
@@ -20,12 +22,20 @@ import {
 import { mergeQueueAction } from "./merge.js";
 import { generateAgentPrompt } from "../utils/agent.js";
 
+const execAsync = promisify(exec);
+
 const acEvidenceSchema = z.object({
   passes: z.boolean(),
   evidence: z.string().optional(),
   command: z.string().optional(),
   output: z.string().optional(),
   blockedReason: z.string().optional(),
+});
+
+const fileExplanationSchema = z.object({
+  file: z.string(),
+  reason: z.string(),
+  lines: z.number(),
 });
 
 export const updateInputSchema = z.object({
@@ -38,6 +48,7 @@ export const updateInputSchema = z.object({
   acEvidence: z.record(acEvidenceSchema).optional().describe("Per-AC evidence mapping (e.g., {'AC-1': {passes: true, evidence: '...', command: '...', output: '...'}})"),
   typecheckPassed: z.boolean().optional().describe("Whether typecheck passed (required for passes: true)"),
   buildPassed: z.boolean().optional().describe("Whether build passed (required for passes: true)"),
+  scopeExplanation: z.array(fileExplanationSchema).optional().describe("Explanation for large changes (required if >1500 lines or >15 files)"),
 });
 
 export type UpdateInput = z.infer<typeof updateInputSchema>;
@@ -59,6 +70,79 @@ export interface UpdateResult {
     type: string | null;
     message: string;
   };
+  scopeGuardrail?: {
+    triggered: boolean;
+    type: "warn" | "hard" | null;
+    totalLines: number;
+    totalFiles: number;
+    message: string;
+  };
+}
+
+// Scope guardrail thresholds
+const SCOPE_WARN_LINES = 1500;
+const SCOPE_WARN_FILES = 15;
+const SCOPE_HARD_LINES = 3000;
+const SCOPE_HARD_FILES = 25;
+
+// Files to exclude from scope analysis
+const EXCLUDED_FILES = [
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'yarn.lock',
+  '.snap',
+  '.lock',
+  'dist/',
+  'build/',
+  '.next/',
+  'node_modules/',
+];
+
+function shouldExcludeFile(filePath: string): boolean {
+  return EXCLUDED_FILES.some(pattern => filePath.includes(pattern));
+}
+
+interface DiffStats {
+  totalLines: number;
+  totalFiles: number;
+  files: Array<{ file: string; added: number; deleted: number; total: number }>;
+}
+
+async function analyzeDiffStats(worktreePath: string): Promise<DiffStats> {
+  try {
+    const { stdout } = await execAsync('git diff --numstat HEAD', { cwd: worktreePath });
+
+    const files: Array<{ file: string; added: number; deleted: number; total: number }> = [];
+    let totalLines = 0;
+
+    for (const line of stdout.trim().split('\n')) {
+      if (!line) continue;
+
+      const [added, deleted, file] = line.split('\t');
+
+      // Skip excluded files
+      if (shouldExcludeFile(file)) continue;
+
+      // Skip binary files (shown as '-' in git diff --numstat)
+      if (added === '-' || deleted === '-') continue;
+
+      const addedNum = parseInt(added, 10);
+      const deletedNum = parseInt(deleted, 10);
+      const total = addedNum + deletedNum;
+
+      files.push({ file, added: addedNum, deleted: deletedNum, total });
+      totalLines += total;
+    }
+
+    return {
+      totalLines,
+      totalFiles: files.length,
+      files,
+    };
+  } catch (error) {
+    // If git diff fails, return empty stats
+    return { totalLines: 0, totalFiles: 0, files: [] };
+  }
 }
 
 function formatDate(date: Date): string {
@@ -140,6 +224,57 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     throw new Error(
       `No story found with ID ${input.storyId} for branch ${input.branch}`
     );
+  }
+
+  // SCOPE GUARDRAIL: Analyze diff stats if worktree exists
+  let scopeGuardrail: UpdateResult["scopeGuardrail"] = undefined;
+  if (exec.worktreePath && existsSync(exec.worktreePath)) {
+    const diffStats = await analyzeDiffStats(exec.worktreePath);
+
+    // Check hard threshold
+    if (diffStats.totalLines > SCOPE_HARD_LINES || diffStats.totalFiles > SCOPE_HARD_FILES) {
+      throw new Error(
+        `SCOPE GUARDRAIL: Changes exceed hard threshold (${diffStats.totalLines} lines, ${diffStats.totalFiles} files). ` +
+        `Hard limit: ${SCOPE_HARD_LINES} lines or ${SCOPE_HARD_FILES} files. ` +
+        `This story is too large and must be split into smaller stories. ` +
+        `Top changed files:\n${diffStats.files.slice(0, 10).map(f => `  - ${f.file}: ${f.total} lines`).join('\n')}`
+      );
+    }
+
+    // Check warn threshold
+    if (diffStats.totalLines > SCOPE_WARN_LINES || diffStats.totalFiles > SCOPE_WARN_FILES) {
+      // Require explanation
+      if (!input.scopeExplanation || input.scopeExplanation.length === 0) {
+        throw new Error(
+          `SCOPE GUARDRAIL: Changes exceed warn threshold (${diffStats.totalLines} lines, ${diffStats.totalFiles} files). ` +
+          `Warn threshold: ${SCOPE_WARN_LINES} lines or ${SCOPE_WARN_FILES} files. ` +
+          `You must provide scopeExplanation with structured justification:\n` +
+          `scopeExplanation: [{ file: "path/to/file.ts", reason: "why in scope", lines: 123 }, ...]\n\n` +
+          `Changed files:\n${diffStats.files.map(f => `  - ${f.file}: ${f.total} lines`).join('\n')}`
+        );
+      }
+
+      // Validate explanation covers significant files
+      const explainedFiles = new Set(input.scopeExplanation.map(e => e.file));
+      const significantFiles = diffStats.files.filter(f => f.total > 50);
+      const missingExplanations = significantFiles.filter(f => !explainedFiles.has(f.file));
+
+      if (missingExplanations.length > 0) {
+        throw new Error(
+          `SCOPE GUARDRAIL: Missing explanations for significant files:\n` +
+          `${missingExplanations.slice(0, 5).map(f => `  - ${f.file}: ${f.total} lines`).join('\n')}\n\n` +
+          `Please provide scopeExplanation for all files with >50 lines changed.`
+        );
+      }
+
+      scopeGuardrail = {
+        triggered: true,
+        type: "warn",
+        totalLines: diffStats.totalLines,
+        totalFiles: diffStats.totalFiles,
+        message: `Warn threshold exceeded. Explanation provided for ${input.scopeExplanation.length} files.`,
+      };
+    }
   }
 
   // VALIDATION: Enforce typecheck and build requirements for passes: true
@@ -346,5 +481,6 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     progress: `${completedCount}/${allStories.length} US`,
     addedToMergeQueue,
     triggeredDependents,
+    scopeGuardrail,
   };
 }
