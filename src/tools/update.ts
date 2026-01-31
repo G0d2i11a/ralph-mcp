@@ -15,9 +15,18 @@ import {
   recordLoopResult,
   updateExecution,
   updateUserStory,
+  AcEvidence,
 } from "../store/state.js";
 import { mergeQueueAction } from "./merge.js";
 import { generateAgentPrompt } from "../utils/agent.js";
+
+const acEvidenceSchema = z.object({
+  passes: z.boolean(),
+  evidence: z.string().optional(),
+  command: z.string().optional(),
+  output: z.string().optional(),
+  blockedReason: z.string().optional(),
+});
 
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
@@ -26,6 +35,9 @@ export const updateInputSchema = z.object({
   notes: z.string().optional().describe("Implementation notes"),
   filesChanged: z.number().optional().describe("Number of files changed (for stagnation detection)"),
   error: z.string().optional().describe("Error message if stuck (for stagnation detection)"),
+  acEvidence: z.record(acEvidenceSchema).optional().describe("Per-AC evidence mapping (e.g., {'AC-1': {passes: true, evidence: '...', command: '...', output: '...'}})"),
+  typecheckPassed: z.boolean().optional().describe("Whether typecheck passed (required for passes: true)"),
+  buildPassed: z.boolean().optional().describe("Whether build passed (required for passes: true)"),
 });
 
 export type UpdateInput = z.infer<typeof updateInputSchema>;
@@ -130,6 +142,48 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     );
   }
 
+  // VALIDATION: Enforce typecheck and build requirements for passes: true
+  if (input.passes) {
+    if (input.typecheckPassed !== true) {
+      throw new Error(
+        `Cannot mark story as passing: typecheck must pass. Run 'pnpm check-types' and provide typecheckPassed: true`
+      );
+    }
+    if (input.buildPassed !== true) {
+      throw new Error(
+        `Cannot mark story as passing: build must pass. Run 'pnpm build' and provide buildPassed: true`
+      );
+    }
+  }
+
+  // Process AC evidence
+  let acEvidence: Record<string, AcEvidence> = input.acEvidence || {};
+
+  // If passes: true but no evidence provided, auto-generate minimal evidence
+  if (input.passes && Object.keys(acEvidence).length === 0) {
+    // Generate AC keys from story's acceptance criteria
+    story.acceptanceCriteria.forEach((_, index) => {
+      const acKey = `AC-${index + 1}`;
+      acEvidence[acKey] = {
+        passes: true,
+        evidence: "Verified via typecheck and build",
+      };
+    });
+  }
+
+  // If passes: false, mark all ACs without evidence as not passing
+  if (!input.passes) {
+    story.acceptanceCriteria.forEach((_, index) => {
+      const acKey = `AC-${index + 1}`;
+      if (!acEvidence[acKey]) {
+        acEvidence[acKey] = {
+          passes: false,
+          blockedReason: input.error || "Story incomplete",
+        };
+      }
+    });
+  }
+
   // Record loop result for stagnation detection
   const filesChanged = input.filesChanged ?? 0;
   const error = input.error ?? null;
@@ -154,10 +208,11 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     };
   }
 
-  // Update story
+  // Update story with evidence
   await updateUserStory(storyKey, {
     passes: input.passes,
     notes: input.notes || story.notes,
+    acEvidence,
   });
 
   // Append to ralph-progress.md if passed

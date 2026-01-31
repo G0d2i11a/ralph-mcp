@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   findExecutionByBranch,
   listUserStoriesByExecutionId,
+  AcEvidence,
 } from "../store/state.js";
 
 export const getInputSchema = z.object({
@@ -33,6 +34,8 @@ export interface GetResult {
     priority: number;
     passes: boolean;
     notes: string | null;
+    acEvidence: Record<string, AcEvidence>;
+    acStatus: string; // e.g., "2/3 AC passing"
   }>;
   progress: {
     completed: number;
@@ -98,15 +101,24 @@ export async function get(input: GetInput): Promise<GetResult> {
       createdAt: exec.createdAt.toISOString(),
       updatedAt: exec.updatedAt.toISOString(),
     },
-    stories: stories.map((s) => ({
-      storyId: s.storyId,
-      title: s.title,
-      description: s.description,
-      acceptanceCriteria: s.acceptanceCriteria,
-      priority: s.priority,
-      passes: s.passes,
-      notes: s.notes,
-    })),
+    stories: stories.map((s) => {
+      const acEvidence = s.acEvidence || {};
+      const totalAc = s.acceptanceCriteria.length;
+      const passingAc = Object.values(acEvidence).filter((ev) => ev.passes).length;
+      const acStatus = totalAc > 0 ? `${passingAc}/${totalAc} AC passing` : "No AC defined";
+
+      return {
+        storyId: s.storyId,
+        title: s.title,
+        description: s.description,
+        acceptanceCriteria: s.acceptanceCriteria,
+        priority: s.priority,
+        passes: s.passes,
+        notes: s.notes,
+        acEvidence,
+        acStatus,
+      };
+    }),
     progress: {
       completed,
       total,

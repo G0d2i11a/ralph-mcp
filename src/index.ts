@@ -16,7 +16,6 @@ import { merge, mergeInputSchema, mergeQueueAction, mergeQueueInputSchema } from
 import { setAgentId, setAgentIdInputSchema } from "./tools/set-agent-id.js";
 import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-stagnation.js";
 import { retry, retryInputSchema } from "./tools/retry.js";
-import { doctor, doctorInputSchema } from "./tools/doctor.js";
 
 const server = new Server(
   {
@@ -413,32 +412,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["branch"],
         },
       },
-      {
-        name: "ralph_doctor",
-        description:
-          "Run environment diagnostics. Checks git, node, pnpm, worktree support, and permissions. Run before ralph_start to catch issues early.",
-        annotations: {
-          title: "Environment Diagnostics",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-        inputSchema: {
-          type: "object",
-          properties: {
-            projectRoot: {
-              type: "string",
-              description: "Project root directory to check (defaults to cwd)",
-            },
-            verbose: {
-              type: "boolean",
-              description: "Include detailed version info and paths (default: false)",
-              default: false,
-            },
-          },
-        },
-      },
     ],
   };
 });
@@ -483,9 +456,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "ralph_retry":
         result = await retry(retryInputSchema.parse(args));
-        break;
-      case "ralph_doctor":
-        result = await doctor(doctorInputSchema.parse(args || {}));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

@@ -47,7 +47,7 @@ export function generateAgentPrompt(
 ${s.description}
 
 **Acceptance Criteria:**
-${s.acceptanceCriteria.map((ac) => `- ${ac}`).join("\n")}
+${s.acceptanceCriteria.map((ac, idx) => `- AC-${idx + 1}: ${ac}`).join("\n")}
 `
     )
     .join("\n");
@@ -137,15 +137,40 @@ Before implementing, verify the story is small enough to complete in ONE context
 1. Work on ONE user story at a time, starting with the highest priority.
 2. ${progressLog ? "Review the 'Progress & Learnings' section above - especially the 'Codebase Patterns' section at the top." : "Check if 'ralph-progress.md' exists and review it for context."}
 3. Implement the feature to satisfy all acceptance criteria.
-4. Run quality checks: \`pnpm check-types\` and \`pnpm --filter api build\` (adjust for repo structure).
+4. Run quality checks: \`pnpm check-types\` and \`pnpm build\` (adjust for repo structure).
 5. **Testing**: Run relevant tests. For UI changes, run component tests if available. If no browser tools are available, note "Manual UI verification needed" in your update notes.
 6. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
 7. **Update Directory CLAUDE.md**: If you discovered reusable patterns, add them to the CLAUDE.md in the directory you modified (create if needed). Only add genuinely reusable knowledge, not story-specific details.
-8. Call \`ralph_update\` with structured status. Include:
+8. Call \`ralph_update\` with structured status and **evidence**. Include:
    - \`passes: true\` if story is complete, \`passes: false\` if blocked/incomplete
+   - \`typecheckPassed: true\` (REQUIRED for passes: true) - Run \`pnpm check-types\`
+   - \`buildPassed: true\` (REQUIRED for passes: true) - Run \`pnpm build\`
    - \`filesChanged\`: number of files modified (for stagnation detection)
    - \`error\`: error message if stuck (for stagnation detection)
+   - \`acEvidence\`: Per-AC evidence mapping (see format below)
    - \`notes\`: detailed implementation notes
+
+   **Evidence Format:**
+   \`\`\`json
+   {
+     "AC-1": {
+       "passes": true,
+       "evidence": "Added migration file db/migrations/001_add_column.sql",
+       "command": "pnpm db:migrate",
+       "output": "Migration applied successfully"
+     },
+     "AC-2": {
+       "passes": true,
+       "evidence": "Updated UserService.ts to handle new field",
+       "command": "pnpm check-types",
+       "output": "No type errors"
+     },
+     "AC-3": {
+       "passes": false,
+       "blockedReason": "Waiting for API endpoint to be deployed"
+     }
+   }
+   \`\`\`
 
    Example:
    \`\`\`
@@ -153,7 +178,13 @@ Before implementing, verify the story is small enough to complete in ONE context
      branch: "${branch}",
      storyId: "${pendingStories[0].storyId}",
      passes: true,
+     typecheckPassed: true,
+     buildPassed: true,
      filesChanged: 5,
+     acEvidence: {
+       "AC-1": { passes: true, evidence: "...", command: "...", output: "..." },
+       "AC-2": { passes: true, evidence: "...", command: "...", output: "..." }
+     },
      notes: "**Implemented:** ... **Files changed:** ... **Learnings:** ..."
    })
    \`\`\`
@@ -173,6 +204,10 @@ Provide structured learnings in the \`notes\` field:
 \`\`\`
 
 ## Quality Requirements (Feedback Loops)
+- **HARD REQUIREMENTS for passes: true:**
+  - \`pnpm check-types\` must pass (provide typecheckPassed: true)
+  - \`pnpm build\` must pass (provide buildPassed: true)
+  - Each AC must have evidence (command output, file paths, test results)
 - ALL commits must pass typecheck and build - broken code compounds across iterations
 - Run relevant tests before committing
 - Keep changes focused and minimal
