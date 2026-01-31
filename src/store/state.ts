@@ -67,6 +67,9 @@ export interface ExecutionRecord {
   consecutiveErrors: number; // Loops with repeated errors
   lastError: string | null; // Last error for comparison
   lastFilesChanged: number; // Files changed in last update
+  // Launch recovery fields (US-006)
+  launchAttemptAt: Date | null; // Last launch attempt timestamp
+  launchAttempts: number; // Number of launch attempts
   createdAt: Date;
   updatedAt: Date;
 }
@@ -95,7 +98,7 @@ export interface MergeQueueItem {
 
 interface StateFileV1 {
   version: 1;
-  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string }>;
+  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
 }
@@ -151,6 +154,9 @@ function deserializeState(file: StateFileV1): StateRuntime {
       consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
       lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
       lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
+      // Launch recovery defaults for backward compatibility (US-006)
+      launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
+      launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
       createdAt: parseDate(e.createdAt, "executions.createdAt"),
       updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
     })),
@@ -173,6 +179,7 @@ function serializeState(state: StateRuntime): StateFileV1 {
     version: 1,
     executions: state.executions.map((e) => ({
       ...e,
+      launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
       createdAt: toIso(e.createdAt),
       updatedAt: toIso(e.updatedAt),
     })),
