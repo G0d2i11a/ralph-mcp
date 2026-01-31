@@ -147,15 +147,22 @@ Before implementing, verify the story is small enough to complete in ONE context
 
 1. Work on ONE user story at a time, starting with the highest priority.
 2. ${progressLog ? "Review the 'Progress & Learnings' section above - especially the 'Codebase Patterns' section at the top." : "Check if 'ralph-progress.md' exists and review it for context."}
-3. Implement the feature to satisfy all acceptance criteria.
-4. Run quality checks: \`pnpm check-types\` and \`pnpm build\` (adjust for repo structure).
-5. **Testing**: Run relevant tests. For UI changes, run component tests if available. If no browser tools are available, note "Manual UI verification needed" in your update notes.
-6. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
-7. **Update Directory CLAUDE.md**: If you discovered reusable patterns, add them to the CLAUDE.md in the directory you modified (create if needed). Only add genuinely reusable knowledge, not story-specific details.
-8. Call \`ralph_update\` with structured status and **evidence**. Include:
+3. **PRE-DECLARATION (REQUIRED)**: Before implementing, declare which files you expect to change:
+   \`\`\`json
+   { "expectedFiles": ["src/path/to/file1.ts", "src/path/to/file2.ts"] }
+   \`\`\`
+   This helps catch scope creep and ensures intentional changes.
+4. Implement the feature to satisfy all acceptance criteria.
+5. Run quality checks: \`pnpm check-types\` and \`pnpm build\` (adjust for repo structure).
+6. **Testing**: Run relevant tests. For UI changes, run component tests if available. If no browser tools are available, note "Manual UI verification needed" in your update notes.
+7. Commit changes with message: \`feat: [${pendingStories[0].storyId}] - ${pendingStories[0].title}\`
+8. **Update Directory CLAUDE.md**: If you discovered reusable patterns, add them to the CLAUDE.md in the directory you modified (create if needed). Only add genuinely reusable knowledge, not story-specific details.
+9. Call \`ralph_update\` with structured status and **evidence**. Include:
    - \`passes: true\` if story is complete, \`passes: false\` if blocked/incomplete
    - \`typecheckPassed: true\` (REQUIRED for passes: true) - Run \`pnpm check-types\`
    - \`buildPassed: true\` (REQUIRED for passes: true) - Run \`pnpm build\`
+   - \`expectedFiles\`: Array of files you declared in step 3
+   - \`unexpectedFileExplanation\`: If you changed files not in expectedFiles, explain why
    - \`filesChanged\`: number of files modified (for stagnation detection)
    - \`error\`: error message if stuck (for stagnation detection)
    - \`acEvidence\`: Per-AC evidence mapping (see format below)
@@ -191,6 +198,7 @@ Before implementing, verify the story is small enough to complete in ONE context
      passes: true,
      typecheckPassed: true,
      buildPassed: true,
+     expectedFiles: ["src/services/user.ts", "src/controllers/user.ts"],
      filesChanged: 5,
      acEvidence: {
        "AC-1": { passes: true, evidence: "...", command: "...", output: "..." },
@@ -199,7 +207,19 @@ Before implementing, verify the story is small enough to complete in ONE context
      notes: "**Implemented:** ... **Files changed:** ... **Learnings:** ..."
    })
    \`\`\`
-9. Continue to the next story until all are complete.
+
+   If you changed unexpected files:
+   \`\`\`
+   ralph_update({
+     ...
+     expectedFiles: ["src/services/user.ts"],
+     unexpectedFileExplanation: [
+       { file: "src/utils/helpers.ts", reason: "Needed to add shared validation function", isNewFile: false }
+     ],
+     ...
+   })
+   \`\`\`
+10. Continue to the next story until all are complete.
 
 ## Notes Format for ralph_update
 
@@ -219,7 +239,13 @@ Provide structured learnings in the \`notes\` field:
   - \`pnpm check-types\` must pass (provide typecheckPassed: true)
   - \`pnpm build\` must pass (provide buildPassed: true)
   - Each AC must have evidence (command output, file paths, test results)
-- **SCOPE GUARDRAILS (prevents scope creep):**
+- **DIFF RECONCILIATION (prevents scope creep):**
+  - Declare expectedFiles BEFORE implementation (step 3)
+  - New files/directories must be declared or explained
+  - Changes outside declaration trigger scope guardrail check
+  - >50% divergence between declared and actual → requires re-evaluation
+  - unexpectedFileExplanation format: \`[{ file: "path", reason: "why", isNewFile: true/false }]\`
+- **SCOPE GUARDRAILS (prevents large changes):**
   - Warn threshold: >1500 lines or >15 files → must provide scopeExplanation
   - Hard threshold: >3000 lines or >25 files → story rejected, must split
   - scopeExplanation format: \`[{ file: "path/to/file.ts", reason: "why in scope", lines: 123 }]\`
