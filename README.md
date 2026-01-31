@@ -3,7 +3,7 @@
 [![npm version](https://badge.fury.io/js/ralph-mcp.svg)](https://www.npmjs.com/package/ralph-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Parallel Ralph loop**: PRD → `ralph_start` → merged. Run multiple PRDs simultaneously in isolated worktrees with auto quality gates and merge.
+**Parallel Ralph loop**: PRD → `ralph_start` → **keep chatting** → merged. Run multiple PRDs simultaneously in isolated worktrees with auto quality gates and merge.
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
@@ -33,6 +33,7 @@ Claude: ralph_start → Task Agent handles everything automatically
 | Lost progress on restart | Persistent state (JSON) |
 | Manual merge coordination | Auto merge with conflict resolution |
 | No visibility into progress | Real-time status tracking |
+| Blocked while waiting | **Keep chatting** while agents work |
 
 ## Features
 
@@ -316,10 +317,12 @@ Override data directory with `RALPH_DATA_DIR` environment variable.
 | `projectRoot` | cwd | Project root directory |
 | `worktree` | `true` | Create isolated git worktree |
 | `autoStart` | `true` | Return agent prompt for immediate execution |
-| `autoMerge` | `false` | Auto-merge when all stories pass |
+| `autoMerge` | `true` | Auto add to merge queue when all stories pass |
 | `notifyOnComplete` | `true` | Show Windows notification on completion |
 | `onConflict` | `"agent"` | Conflict resolution: `auto_theirs`, `auto_ours`, `notify`, `agent` |
 | `contextInjectionPath` | `undefined` | Optional path to file (e.g. CLAUDE.md) to inject into prompt |
+| `ignoreDependencies` | `false` | Skip dependency check and start even if dependencies are not satisfied |
+| `queueIfBlocked` | `false` | If dependencies are not satisfied, create a pending execution instead of failing |
 
 ### Example with options
 

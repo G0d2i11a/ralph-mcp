@@ -8,7 +8,14 @@ Copy this file to your project and customize the quality check commands.
 
 # /ralph - Parallel Ralph Loop
 
-Ralph is a 2-step PRD execution system: **Generate PRD → Start Execution**.
+Ralph is a 2-step PRD execution system: **Generate PRD → Start Execution → Keep Chatting**.
+
+## Core Concept
+
+**Delegate and continue.** After `ralph_start`, agents work in the background. You can:
+- Continue chatting with Claude about other topics
+- Start more PRDs in parallel
+- Check progress anytime with `ralph_status`
 
 ## Core Workflow (2 Steps)
 
@@ -114,7 +121,9 @@ Claude:
 3 PRDs started. They'll auto-merge when complete.
 Use ralph_status to check progress.
 
---- Some time later ---
+User: While those run, help me debug this API error...  ← Keep chatting!
+
+Claude: [Helps with debugging normally]
 
 User: Progress?
 
@@ -123,7 +132,9 @@ Claude: [ralph_status]
 ✅ prd-password-reset - Merged
 🔄 prd-oauth - US-002/003 in progress
 
-User: 👍
+User: Great, now let's work on the dashboard...  ← Continue other work
+
+Claude: [Continues helping with dashboard]
 ```
 
 ## Quality Gates
