@@ -110,7 +110,28 @@ interface DiffStats {
 
 async function analyzeDiffStats(worktreePath: string): Promise<DiffStats> {
   try {
-    const { stdout } = await execAsync('git diff --numstat HEAD', { cwd: worktreePath });
+    // Compare against main branch to track cumulative changes across the entire PRD execution
+    // This is important because the agent commits BEFORE calling ralph_update,
+    // so `git diff HEAD` would show 0 changes. We need to compare against the base branch.
+    // Try main first, then master, then fall back to HEAD (uncommitted changes only)
+    let stdout = "";
+    let baseBranch = "main";
+
+    try {
+      const result = await execAsync('git diff --numstat main...HEAD', { cwd: worktreePath });
+      stdout = result.stdout;
+    } catch {
+      try {
+        const result = await execAsync('git diff --numstat master...HEAD', { cwd: worktreePath });
+        stdout = result.stdout;
+        baseBranch = "master";
+      } catch {
+        // Fall back to uncommitted changes if no main/master branch
+        const result = await execAsync('git diff --numstat HEAD', { cwd: worktreePath });
+        stdout = result.stdout;
+        baseBranch = "HEAD";
+      }
+    }
 
     const files: Array<{ file: string; added: number; deleted: number; total: number }> = [];
     let totalLines = 0;
