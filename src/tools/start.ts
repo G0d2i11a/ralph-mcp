@@ -110,6 +110,7 @@ export async function start(input: StartInput): Promise<StartResult> {
     priority: story.priority,
     passes: false,
     notes: "",
+    acEvidence: {},
   }));
 
   if (storyRecords.length > 0) {

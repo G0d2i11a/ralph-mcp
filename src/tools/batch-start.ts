@@ -210,6 +210,7 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
         priority: story.priority,
         passes: false,
         notes: "",
+        acEvidence: {},
       }));
 
       if (storyRecords.length > 0) {
