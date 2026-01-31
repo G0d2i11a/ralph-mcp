@@ -16,6 +16,7 @@ import { merge, mergeInputSchema, mergeQueueAction, mergeQueueInputSchema } from
 import { setAgentId, setAgentIdInputSchema } from "./tools/set-agent-id.js";
 import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-stagnation.js";
 import { retry, retryInputSchema } from "./tools/retry.js";
+import { doctor, doctorInputSchema } from "./tools/doctor.js";
 
 const server = new Server(
   {
@@ -36,7 +37,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_start",
         description:
-          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start.",
+          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. Fails if dependencies are not satisfied unless ignoreDependencies is true.",
+        annotations: {
+          title: "Start PRD Execution",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -74,6 +82,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Conflict resolution strategy for merge (default: agent)",
               default: "agent",
             },
+            ignoreDependencies: {
+              type: "boolean",
+              description: "Skip dependency check and start even if dependencies are not satisfied (default: false)",
+              default: false,
+            },
           },
           required: ["prdPath"],
         },
@@ -82,6 +95,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_status",
         description:
           "View all PRD execution status. Replaces manual TaskOutput queries. Shows progress, status, and summary.",
+        annotations: {
+          title: "View Execution Status",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -94,12 +114,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ["pending", "running", "completed", "failed", "stopped", "merging"],
               description: "Filter by status",
             },
+            reconcile: {
+              type: "boolean",
+              description: "Auto-fix status inconsistencies with git (default: true)",
+              default: true,
+            },
           },
         },
       },
       {
         name: "ralph_get",
         description: "Get detailed status of a single PRD execution including all user stories.",
+        annotations: {
+          title: "Get Execution Details",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -115,6 +147,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_update",
         description:
           "Update User Story status. Called by subagent after completing a story.",
+        annotations: {
+          title: "Update Story Status",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -149,6 +188,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_stop",
         description: "Stop PRD execution. Optionally clean up worktree.",
+        annotations: {
+          title: "Stop Execution",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -174,6 +220,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_merge",
         description:
           "Merge completed PRD to main and clean up worktree. MCP executes directly without Claude context.",
+        annotations: {
+          title: "Merge to Main",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -199,6 +252,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_merge_queue",
         description:
           "Manage merge queue. Default serial merge to avoid conflicts.",
+        annotations: {
+          title: "Manage Merge Queue",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -219,6 +279,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_set_agent_id",
         description:
           "Record the Claude Task agent ID for an execution. Called after starting a Task agent.",
+        annotations: {
+          title: "Set Agent ID",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -238,6 +305,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_batch_start",
         description:
           "Start multiple PRDs with dependency resolution. Parses all PRDs, creates worktrees, runs pnpm install serially (avoids store lock), and returns agent prompts for PRDs whose dependencies are satisfied.",
+        annotations: {
+          title: "Batch Start PRDs",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -288,6 +362,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_reset_stagnation",
         description:
           "Reset stagnation counters for an execution. Use after manual intervention to allow the agent to continue.",
+        annotations: {
+          title: "Reset Stagnation",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -308,6 +389,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "ralph_retry",
         description:
           "Retry a failed PRD execution. Resets stagnation counters and generates a new agent prompt to continue from where it left off.",
+        annotations: {
+          title: "Retry Execution",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -317,6 +405,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["branch"],
+        },
+      },
+      {
+        name: "ralph_doctor",
+        description:
+          "Run environment diagnostics. Checks git, node, pnpm, worktree support, and permissions. Run before ralph_start to catch issues early.",
+        annotations: {
+          title: "Environment Diagnostics",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            projectRoot: {
+              type: "string",
+              description: "Project root directory to check (defaults to cwd)",
+            },
+            verbose: {
+              type: "boolean",
+              description: "Include detailed version info and paths (default: false)",
+              default: false,
+            },
+          },
         },
       },
     ],
@@ -363,6 +477,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "ralph_retry":
         result = await retry(retryInputSchema.parse(args));
+        break;
+      case "ralph_doctor":
+        result = await doctor(doctorInputSchema.parse(args || {}));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
