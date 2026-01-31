@@ -1,10 +1,9 @@
 import { z } from "zod";
-import { resolve, basename } from "path";
-import { randomUUID } from "crypto";
+import { resolve } from "path";
 import { execSync } from "child_process";
 import { parsePrdFile } from "../utils/prd-parser.js";
-import { createWorktree } from "../utils/worktree.js";
 import { generateAgentPrompt } from "../utils/agent.js";
+import { createExecutionFromPrd } from "../utils/execution.js";
 import {
   detectPackageManager,
   getInstallCommand,
@@ -12,9 +11,6 @@ import {
 } from "../utils/package-manager.js";
 import {
   areDependenciesSatisfied,
-  findExecutionByBranch,
-  insertExecution,
-  insertUserStories,
   updateExecution,
   ExecutionRecord,
 } from "../store/state.js";
@@ -135,7 +131,6 @@ function preheatWorktree(worktreePath: string, installCmd: InstallCommand): void
 
 export async function batchStart(input: BatchStartInput): Promise<BatchStartResult> {
   const projectRoot = input.projectRoot || process.cwd();
-  const projectName = basename(projectRoot);
   const contextPath = input.contextInjectionPath
     ? resolve(projectRoot, input.contextInjectionPath)
     : undefined;
@@ -154,86 +149,24 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
 
     try {
       const prd = parsePrdFile(fullPath);
-
-      // Check if execution already exists
-      const existing = await findExecutionByBranch(prd.branchName);
-      if (existing) {
-        skipped.push({
-          prdPath,
-          reason: `Execution already exists for branch ${prd.branchName}`,
-        });
-        continue;
-      }
-
-      // Create worktree if requested
-      let worktreePath: string | null = null;
-      if (input.worktree) {
-        worktreePath = await createWorktree(projectRoot, prd.branchName);
-      }
-
-      // Create execution record
-      const executionId = randomUUID();
-      const now = new Date();
-
-      await insertExecution({
-        id: executionId,
-        project: projectName,
-        branch: prd.branchName,
-        description: prd.description,
+      const created = await createExecutionFromPrd({
+        projectRoot,
         prdPath: fullPath,
-        projectRoot: projectRoot,
-        worktreePath: worktreePath,
-        status: "pending",
-        agentTaskId: null,
+        prd,
+        worktree: input.worktree,
         onConflict: input.onConflict,
         autoMerge: input.autoMerge,
         notifyOnComplete: input.notifyOnComplete,
-        dependencies: prd.dependencies,
-        // Stagnation detection fields
-        loopCount: 0,
-        consecutiveNoProgress: 0,
-        consecutiveErrors: 0,
-        lastError: null,
-        lastFilesChanged: 0,
-        // Launch recovery fields
-        launchAttemptAt: null,
-        launchAttempts: 0,
-        createdAt: now,
-        updatedAt: now,
+        status: "pending",
       });
-
-      // Create user story records
-      const storyRecords = prd.userStories.map((story) => ({
-        id: `${executionId}:${story.id}`,
-        executionId: executionId,
-        storyId: story.id,
-        title: story.title,
-        description: story.description,
-        acceptanceCriteria: story.acceptanceCriteria,
-        priority: story.priority,
-        passes: false,
-        notes: "",
-        acEvidence: {},
-      }));
-
-      if (storyRecords.length > 0) {
-        await insertUserStories(storyRecords);
-      }
 
       prdInfos.push({
         prdPath,
-        branch: prd.branchName,
+        branch: created.branch,
         dependencies: prd.dependencies,
-        worktreePath,
-        executionId,
-        stories: storyRecords.map((s) => ({
-          storyId: s.storyId,
-          title: s.title,
-          description: s.description,
-          acceptanceCriteria: s.acceptanceCriteria,
-          priority: s.priority,
-          passes: s.passes,
-        })),
+        worktreePath: created.worktreePath,
+        executionId: created.executionId,
+        stories: created.stories,
       });
     } catch (error) {
       skipped.push({

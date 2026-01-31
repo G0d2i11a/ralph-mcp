@@ -38,7 +38,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_start",
         description:
-          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. Fails if dependencies are not satisfied unless ignoreDependencies is true.",
+          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. If dependencies are not satisfied, it fails by default, can queue with queueIfBlocked, or can force start with ignoreDependencies.",
         annotations: {
           title: "Start PRD Execution",
           readOnlyHint: false,
@@ -86,6 +86,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             ignoreDependencies: {
               type: "boolean",
               description: "Skip dependency check and start even if dependencies are not satisfied (default: false)",
+              default: false,
+            },
+            queueIfBlocked: {
+              type: "boolean",
+              description:
+                "If dependencies are not satisfied, create a pending execution instead of failing (default: false)",
               default: false,
             },
           },
