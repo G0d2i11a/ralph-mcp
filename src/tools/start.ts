@@ -95,6 +95,9 @@ export async function start(input: StartInput): Promise<StartResult> {
     consecutiveErrors: 0,
     lastError: null,
     lastFilesChanged: 0,
+    // Launch recovery fields
+    launchAttemptAt: null,
+    launchAttempts: 0,
     createdAt: now,
     updatedAt: now,
   });

@@ -115,6 +115,10 @@ export class Runner {
     if (!this.running) return;
 
     try {
+      // First, check for timed-out starting PRDs
+      await this.recoverTimedOutPrds();
+
+      // Then process ready PRDs
       await this.processReadyPrds();
     } catch (error) {
       this.log("error", `Poll error: ${error instanceof Error ? error.message : String(error)}`);
@@ -123,6 +127,49 @@ export class Runner {
     // Schedule next poll
     if (this.running) {
       this.pollTimer = setTimeout(() => this.poll(), this.config.interval);
+    }
+  }
+
+  /**
+   * Recover PRDs stuck in 'starting' status (timeout detection).
+   */
+  private async recoverTimedOutPrds(): Promise<void> {
+    const executions = await listExecutions();
+    const now = Date.now();
+
+    // Find PRDs in 'starting' status that have timed out
+    const timedOutPrds = executions.filter((e) => {
+      if (e.status !== "starting") return false;
+      if (!e.launchAttemptAt) return false;
+
+      const elapsed = now - e.launchAttemptAt.getTime();
+      return elapsed > this.config.launchTimeout;
+    });
+
+    for (const prd of timedOutPrds) {
+      this.log("warn", `PRD ${prd.branch} timed out in 'starting' status (attempt ${prd.launchAttempts}/${this.config.maxRetries})`);
+
+      if (prd.launchAttempts >= this.config.maxRetries) {
+        // Max retries exceeded - mark as failed
+        this.log("error", `PRD ${prd.branch} exceeded max retries (${this.config.maxRetries}), marking as failed`);
+        await updateExecution(prd.id, {
+          status: "failed",
+          lastError: `Launch failed after ${prd.launchAttempts} attempts (timeout)`,
+          updatedAt: new Date(),
+        });
+
+        if (this.config.onPrdFailed) {
+          this.config.onPrdFailed(prd.branch, `Launch failed after ${prd.launchAttempts} attempts`);
+        }
+      } else {
+        // Revert to ready for retry
+        this.log("info", `Reverting ${prd.branch} to 'ready' for retry`);
+        await updateExecution(prd.id, {
+          status: "ready",
+          lastError: `Launch timeout (attempt ${prd.launchAttempts})`,
+          updatedAt: new Date(),
+        });
+      }
     }
   }
 
@@ -232,23 +279,32 @@ export class Runner {
   }
 
   /**
-   * Handle launch failure - revert to ready or mark as failed.
+   * Handle launch failure - revert to ready or mark as failed based on retry count.
    */
   private async handleLaunchFailure(branch: string, error: string): Promise<void> {
     const exec = await findExecutionByBranch(branch);
     if (!exec) return;
 
-    // Note: US-006 will add launchAttempts tracking
-    // For now, just revert to ready
     try {
-      await updateExecution(exec.id, {
-        status: "ready",
-        lastError: error,
-        updatedAt: new Date(),
-      });
-      this.log("info", `Reverted ${branch} to ready status for retry`);
+      if (exec.launchAttempts >= this.config.maxRetries) {
+        // Max retries exceeded - mark as failed
+        this.log("error", `PRD ${branch} exceeded max retries (${this.config.maxRetries}), marking as failed`);
+        await updateExecution(exec.id, {
+          status: "failed",
+          lastError: `Launch failed after ${exec.launchAttempts} attempts: ${error}`,
+          updatedAt: new Date(),
+        });
+      } else {
+        // Revert to ready for retry
+        await updateExecution(exec.id, {
+          status: "ready",
+          lastError: error,
+          updatedAt: new Date(),
+        });
+        this.log("info", `Reverted ${branch} to ready status for retry (attempt ${exec.launchAttempts}/${this.config.maxRetries})`);
+      }
     } catch (e: unknown) {
-      this.log("error", `Failed to revert ${branch}: ${e instanceof Error ? e.message : String(e)}`);
+      this.log("error", `Failed to update ${branch}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 }

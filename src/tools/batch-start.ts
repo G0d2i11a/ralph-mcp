@@ -195,6 +195,9 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
         consecutiveErrors: 0,
         lastError: null,
         lastFilesChanged: 0,
+        // Launch recovery fields
+        launchAttemptAt: null,
+        launchAttempts: 0,
         createdAt: now,
         updatedAt: now,
       });

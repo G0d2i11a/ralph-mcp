@@ -52,11 +52,13 @@ export async function claimReady(input: ClaimReadyInput): Promise<ClaimReadyResu
     };
   }
 
-  // Atomically update to 'starting'
+  // Atomically update to 'starting' and record launch attempt
   // Note: The state.ts uses a lock mechanism, so this is safe
   try {
     await updateExecution(exec.id, {
       status: "starting",
+      launchAttemptAt: new Date(),
+      launchAttempts: exec.launchAttempts + 1,
       updatedAt: new Date(),
     });
   } catch (e) {
