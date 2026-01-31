@@ -347,3 +347,88 @@ export async function handleSchemaConflict(
     return false;
   }
 }
+
+/**
+ * Update PRD file with completion metadata
+ */
+export function updatePrdMetadata(
+  prdPath: string,
+  branch: string,
+  commitHash: string
+): boolean {
+  if (!existsSync(prdPath)) {
+    return false;
+  }
+
+  try {
+    let content = readFileSync(prdPath, "utf-8");
+    const executedAt = new Date().toISOString().split("T")[0];
+
+    // Check if file already has frontmatter
+    const hasFrontmatter = content.startsWith("---\n");
+
+    const metadata = `---
+status: completed
+executedAt: ${executedAt}
+branch: ${branch}
+mergeSha: ${commitHash}
+---
+
+`;
+
+    if (hasFrontmatter) {
+      // Replace existing frontmatter
+      content = content.replace(/^---\n[\s\S]*?\n---\n\n?/, metadata);
+    } else {
+      // Add frontmatter at the beginning
+      content = metadata + content;
+    }
+
+    writeFileSync(prdPath, content, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Update tasks/INDEX.md with completed PRD
+ */
+export function updatePrdIndex(
+  projectRoot: string,
+  prdPath: string,
+  branch: string,
+  commitHash: string
+): boolean {
+  const indexPath = join(projectRoot, "tasks", "INDEX.md");
+
+  if (!existsSync(indexPath)) {
+    return false;
+  }
+
+  try {
+    let content = readFileSync(indexPath, "utf-8");
+    const executedAt = new Date().toISOString().split("T")[0];
+    const prdFileName = prdPath.split(/[/\\]/).pop() || "";
+    const shortHash = commitHash.slice(0, 7);
+
+    // Create entry for completed PRD
+    const entry = `| [${prdFileName}](./${prdFileName}) | ${executedAt} | ${branch} | ${shortHash} |`;
+
+    // Find the "已完成" section and add entry
+    const completedPattern = /## 已完成\n\n\| PRD \| 完成时间 \| 分支 \| Merge SHA \|\n\|-----|----------|------|-----------|/;
+
+    if (completedPattern.test(content)) {
+      content = content.replace(
+        completedPattern,
+        `## 已完成\n\n| PRD | 完成时间 | 分支 | Merge SHA |\n|-----|----------|------|-----------|
+${entry}`
+      );
+    }
+
+    writeFileSync(indexPath, content, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
