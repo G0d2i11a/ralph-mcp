@@ -5,12 +5,14 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ralph-mcp": "dist/index.js"
+    "ralph-mcp": "dist/index.js",
+    "ralph-runner": "dist/runner-cli.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "runner": "node dist/runner-cli.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
