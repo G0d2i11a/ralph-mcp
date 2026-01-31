@@ -18,6 +18,7 @@ import {
 } from "../store/state.js";
 import { mergeQueueAction } from "./merge.js";
 import { generateAgentPrompt } from "../utils/agent.js";
+import { syncMainToBranch } from "../utils/merge-helpers.js";
 
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
@@ -38,9 +39,11 @@ export interface UpdateResult {
   allComplete: boolean;
   progress: string;
   addedToMergeQueue: boolean;
-  triggeredDependents: Array<{
+  /** Dependents that were marked as ready (dependencies satisfied, worktree synced) */
+  readyDependents: Array<{
     branch: string;
-    agentPrompt: string | null;
+    syncSuccess: boolean;
+    syncError?: string;
   }>;
   stagnation?: {
     isStagnant: boolean;
@@ -145,7 +148,7 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       allComplete: false,
       progress: `Stagnation detected`,
       addedToMergeQueue: false,
-      triggeredDependents: [],
+      readyDependents: [],
       stagnation: {
         isStagnant: true,
         type: stagnationResult.type,
@@ -241,12 +244,12 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
   }
 
   // Trigger dependent executions when this PRD completes
-  const triggeredDependents: Array<{ branch: string; agentPrompt: string | null }> = [];
+  const readyDependents: Array<{ branch: string; syncSuccess: boolean; syncError?: string }> = [];
   if (allComplete) {
     const dependents = await findExecutionsDependingOn(exec.branch);
 
     for (const dep of dependents) {
-      // Skip if already running or completed
+      // Skip if not pending (already running, completed, etc.)
       if (dep.status !== "pending") {
         continue;
       }
@@ -255,29 +258,42 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       const depStatus = await areDependenciesSatisfied(dep);
 
       if (depStatus.satisfied) {
-        // Get user stories for this dependent execution
-        const depStories = await listUserStoriesByExecutionId(dep.id);
+        // Sync main to the dependent's worktree before marking as ready
+        let syncSuccess = true;
+        let syncError: string | undefined;
 
-        // Generate agent prompt for the dependent
-        const agentPrompt = generateAgentPrompt(
-          dep.branch,
-          dep.description,
-          dep.worktreePath || dep.projectRoot,
-          depStories.map((s) => ({
-            storyId: s.storyId,
-            title: s.title,
-            description: s.description,
-            acceptanceCriteria: s.acceptanceCriteria,
-            priority: s.priority,
-            passes: s.passes,
-          })),
-          undefined // contextPath not stored, would need to re-parse PRD if needed
-        );
+        if (dep.worktreePath) {
+          try {
+            const syncResult = await syncMainToBranch(dep.worktreePath, dep.branch);
+            if (!syncResult.success) {
+              syncSuccess = false;
+              syncError = syncResult.message;
+            }
+          } catch (e) {
+            syncSuccess = false;
+            syncError = e instanceof Error ? e.message : String(e);
+          }
+        }
 
-        triggeredDependents.push({
-          branch: dep.branch,
-          agentPrompt,
-        });
+        if (syncSuccess) {
+          // Mark as ready - Runner will pick it up
+          await updateExecution(dep.id, {
+            status: "ready",
+            updatedAt: new Date(),
+          });
+
+          readyDependents.push({
+            branch: dep.branch,
+            syncSuccess: true,
+          });
+        } else {
+          // Keep as pending if sync failed, record the error
+          readyDependents.push({
+            branch: dep.branch,
+            syncSuccess: false,
+            syncError,
+          });
+        }
       }
     }
   }
@@ -290,6 +306,6 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     allComplete,
     progress: `${completedCount}/${allStories.length} US`,
     addedToMergeQueue,
-    triggeredDependents,
+    readyDependents,
   };
 }
