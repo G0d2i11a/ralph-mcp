@@ -20,7 +20,7 @@ const INTERRUPT_TIMEOUT_MS = 30 * 60 * 1000;
 export const statusInputSchema = z.object({
   project: z.string().optional().describe("Filter by project name"),
   status: z
-    .enum(["pending", "running", "completed", "failed", "stopped", "merging"])
+    .enum(["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"])
     .optional()
     .describe("Filter by status"),
   reconcile: z
@@ -340,10 +340,12 @@ export async function status(input: StatusInput): Promise<StatusResult> {
   const interruptedExecutions = executionStatuses.filter((e) => e.isInterrupted);
   const summary = {
     total: executionStatuses.length,
+    pending: executionStatuses.filter((e) => e.status === "pending").length,
+    ready: executionStatuses.filter((e) => e.status === "ready").length,
+    starting: executionStatuses.filter((e) => e.status === "starting").length,
     running: executionStatuses.filter((e) => e.status === "running" && !e.isInterrupted).length,
     completed: executionStatuses.filter((e) => e.status === "completed").length,
     failed: executionStatuses.filter((e) => e.status === "failed").length,
-    pending: executionStatuses.filter((e) => e.status === "pending").length,
     interrupted: interruptedExecutions.length,
     atRisk: executionStatuses.filter(
       (e) => e.consecutiveNoProgress >= 2 || e.consecutiveErrors >= 3
