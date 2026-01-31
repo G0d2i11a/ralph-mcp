@@ -47,6 +47,14 @@ export interface ExecutionRecord {
   updatedAt: Date;
 }
 
+export interface AcEvidence {
+  passes: boolean;
+  evidence?: string;
+  command?: string;
+  output?: string;
+  blockedReason?: string;
+}
+
 export interface UserStoryRecord {
   id: string; // `${executionId}:${storyId}`
   executionId: string;
@@ -57,6 +65,7 @@ export interface UserStoryRecord {
   priority: number;
   passes: boolean;
   notes: string;
+  acEvidence: Record<string, AcEvidence>; // Per-AC evidence mapping
 }
 
 export type MergeQueueStatus = "pending" | "merging" | "completed" | "failed";
@@ -136,6 +145,9 @@ function deserializeState(file: StateFileV1): StateRuntime {
         ? s.acceptanceCriteria
         : [],
       notes: typeof s.notes === "string" ? s.notes : "",
+      acEvidence: typeof (s as any).acEvidence === "object" && (s as any).acEvidence !== null
+        ? (s as any).acEvidence
+        : {},
     })),
     mergeQueue: file.mergeQueue.map((q) => ({
       ...q,
