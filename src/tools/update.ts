@@ -38,6 +38,13 @@ const fileExplanationSchema = z.object({
   lines: z.number(),
 });
 
+const unexpectedFileExplanationSchema = z.object({
+  file: z.string(),
+  reason: z.string().describe("Why this file was changed even though it wasn't in expectedFiles"),
+  isNewFile: z.boolean().optional().describe("Whether this is a newly created file"),
+  isNewDirectory: z.boolean().optional().describe("Whether this file is in a newly created directory"),
+});
+
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
   storyId: z.string().describe("Story ID (e.g., US-001)"),
@@ -49,6 +56,8 @@ export const updateInputSchema = z.object({
   typecheckPassed: z.boolean().optional().describe("Whether typecheck passed (required for passes: true)"),
   buildPassed: z.boolean().optional().describe("Whether build passed (required for passes: true)"),
   scopeExplanation: z.array(fileExplanationSchema).optional().describe("Explanation for large changes (required if >1500 lines or >15 files)"),
+  expectedFiles: z.array(z.string()).optional().describe("Pre-declared list of files expected to be changed (declare before implementation)"),
+  unexpectedFileExplanation: z.array(unexpectedFileExplanationSchema).optional().describe("Explanation for files changed that weren't in expectedFiles"),
 });
 
 export type UpdateInput = z.infer<typeof updateInputSchema>;
@@ -75,6 +84,15 @@ export interface UpdateResult {
     type: "warn" | "hard" | null;
     totalLines: number;
     totalFiles: number;
+    message: string;
+  };
+  diffReconciliation?: {
+    triggered: boolean;
+    expectedFiles: string[];
+    actualFiles: string[];
+    unexpectedFiles: string[];
+    missingFiles: string[];
+    divergencePercent: number;
     message: string;
   };
 }
@@ -298,6 +316,71 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     }
   }
 
+  // DIFF RECONCILIATION: Compare expected vs actual files changed
+  let diffReconciliation: UpdateResult["diffReconciliation"] = undefined;
+  if (exec.worktreePath && existsSync(exec.worktreePath) && input.expectedFiles && input.expectedFiles.length > 0) {
+    const diffStats = await analyzeDiffStats(exec.worktreePath);
+    const actualFiles = diffStats.files.map(f => f.file);
+    const expectedSet = new Set(input.expectedFiles);
+    const actualSet = new Set(actualFiles);
+
+    // Find unexpected files (in actual but not in expected)
+    const unexpectedFiles = actualFiles.filter(f => !expectedSet.has(f));
+
+    // Find missing files (in expected but not in actual)
+    const missingFiles = input.expectedFiles.filter(f => !actualSet.has(f));
+
+    // Calculate divergence percentage
+    const totalUnique = new Set([...input.expectedFiles, ...actualFiles]).size;
+    const divergencePercent = totalUnique > 0
+      ? Math.round(((unexpectedFiles.length + missingFiles.length) / totalUnique) * 100)
+      : 0;
+
+    // Check if unexpected files need explanation
+    if (unexpectedFiles.length > 0) {
+      const explainedUnexpected = new Set(
+        (input.unexpectedFileExplanation || []).map(e => e.file)
+      );
+      const unexplainedFiles = unexpectedFiles.filter(f => !explainedUnexpected.has(f));
+
+      if (unexplainedFiles.length > 0) {
+        // Check if any are new files (not in git history before this branch)
+        throw new Error(
+          `DIFF RECONCILIATION: Unexpected files changed that weren't in expectedFiles:\n` +
+          `${unexplainedFiles.slice(0, 10).map(f => `  - ${f}`).join('\n')}\n\n` +
+          `You must either:\n` +
+          `1. Add these files to expectedFiles before implementation, OR\n` +
+          `2. Provide unexpectedFileExplanation: [{ file: "path", reason: "why changed", isNewFile: true/false }]`
+        );
+      }
+    }
+
+    // Warn if divergence is too high (>50%)
+    if (divergencePercent > 50) {
+      throw new Error(
+        `DIFF RECONCILIATION: Declaration vs actual divergence too high (${divergencePercent}%).\n` +
+        `Expected files: ${input.expectedFiles.length}\n` +
+        `Actual files: ${actualFiles.length}\n` +
+        `Unexpected: ${unexpectedFiles.length} files\n` +
+        `Missing: ${missingFiles.length} files\n\n` +
+        `This suggests the implementation scope changed significantly from the plan.\n` +
+        `Please re-evaluate the story scope and update expectedFiles accordingly.`
+      );
+    }
+
+    diffReconciliation = {
+      triggered: unexpectedFiles.length > 0 || missingFiles.length > 0,
+      expectedFiles: input.expectedFiles,
+      actualFiles,
+      unexpectedFiles,
+      missingFiles,
+      divergencePercent,
+      message: divergencePercent > 0
+        ? `Divergence: ${divergencePercent}%. Unexpected: ${unexpectedFiles.length}, Missing: ${missingFiles.length}`
+        : "Declaration matches actual changes",
+    };
+  }
+
   // VALIDATION: Enforce typecheck and build requirements for passes: true
   if (input.passes) {
     if (input.typecheckPassed !== true) {
@@ -503,5 +586,6 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     addedToMergeQueue,
     triggeredDependents,
     scopeGuardrail,
+    diffReconciliation,
   };
 }
