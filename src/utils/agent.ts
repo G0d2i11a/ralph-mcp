@@ -19,6 +19,7 @@ export function generateAgentPrompt(
     acceptanceCriteria: string[];
     priority: number;
     passes: boolean;
+    acEvidence?: Record<string, { passes: boolean; evidence?: string; command?: string; output?: string; blockedReason?: string }>;
   }>,
   contextInjectionPath?: string,
   loopContext?: {
@@ -42,13 +43,23 @@ export function generateAgentPrompt(
 
   const storiesText = pendingStories
     .map(
-      (s) => `
+      (s) => {
+        const acEvidence = s.acEvidence || {};
+        const acList = s.acceptanceCriteria.map((ac, idx) => {
+          const acKey = `AC-${idx + 1}`;
+          const evidence = acEvidence[acKey];
+          const status = evidence?.passes ? "✓" : "○";
+          return `- ${status} AC-${idx + 1}: ${ac}${evidence?.passes ? ` (completed)` : ""}`;
+        }).join("\n");
+
+        return `
 ### ${s.storyId}: ${s.title}
 ${s.description}
 
 **Acceptance Criteria:**
-${s.acceptanceCriteria.map((ac, idx) => `- AC-${idx + 1}: ${ac}`).join("\n")}
-`
+${acList}
+`;
+      }
     )
     .join("\n");
 
