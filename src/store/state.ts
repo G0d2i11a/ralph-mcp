@@ -129,12 +129,18 @@ interface StateFileV1 {
   executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
+  // Archived data for history
+  archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null }>;
+  archivedUserStories?: UserStoryRecord[];
 }
 
 interface StateRuntime {
   executions: ExecutionRecord[];
   userStories: UserStoryRecord[];
   mergeQueue: MergeQueueItem[];
+  // Archived data for history
+  archivedExecutions: ExecutionRecord[];
+  archivedUserStories: UserStoryRecord[];
 }
 
 function parseDate(value: string, fieldName: string): Date {
@@ -150,7 +156,7 @@ function toIso(date: Date): string {
 }
 
 function defaultState(): StateRuntime {
-  return { executions: [], userStories: [], mergeQueue: [] };
+  return { executions: [], userStories: [], mergeQueue: [], archivedExecutions: [], archivedUserStories: [] };
 }
 
 function normalizeState(raw: unknown): StateFileV1 {
@@ -159,6 +165,8 @@ function normalizeState(raw: unknown): StateFileV1 {
     executions: [],
     userStories: [],
     mergeQueue: [],
+    archivedExecutions: [],
+    archivedUserStories: [],
   };
 
   if (!raw || typeof raw !== "object") return base;
@@ -168,61 +176,73 @@ function normalizeState(raw: unknown): StateFileV1 {
   if (Array.isArray(obj.executions)) base.executions = obj.executions as StateFileV1["executions"];
   if (Array.isArray(obj.userStories)) base.userStories = obj.userStories as StateFileV1["userStories"];
   if (Array.isArray(obj.mergeQueue)) base.mergeQueue = obj.mergeQueue as StateFileV1["mergeQueue"];
+  if (Array.isArray(obj.archivedExecutions)) base.archivedExecutions = obj.archivedExecutions as StateFileV1["archivedExecutions"];
+  if (Array.isArray(obj.archivedUserStories)) base.archivedUserStories = obj.archivedUserStories as StateFileV1["archivedUserStories"];
   return base;
 }
 
 function deserializeState(file: StateFileV1): StateRuntime {
+  const deserializeExecution = (e: StateFileV1["executions"][0]) => ({
+    ...e,
+    dependencies: Array.isArray(e.dependencies) ? e.dependencies : [],
+    // Stagnation detection defaults for backward compatibility
+    loopCount: typeof (e as any).loopCount === "number" ? (e as any).loopCount : 0,
+    consecutiveNoProgress: typeof (e as any).consecutiveNoProgress === "number" ? (e as any).consecutiveNoProgress : 0,
+    consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
+    lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
+    lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
+    // Launch recovery defaults for backward compatibility (US-006)
+    launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
+    launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
+    // Merge tracking defaults for backward compatibility
+    mergedAt: typeof (e as any).mergedAt === "string" ? parseDate((e as any).mergedAt, "executions.mergedAt") : null,
+    mergeCommitSha: typeof (e as any).mergeCommitSha === "string" ? (e as any).mergeCommitSha : null,
+    createdAt: parseDate(e.createdAt, "executions.createdAt"),
+    updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
+  });
+
+  const deserializeUserStory = (s: UserStoryRecord) => ({
+    ...s,
+    acceptanceCriteria: Array.isArray(s.acceptanceCriteria)
+      ? s.acceptanceCriteria
+      : [],
+    notes: typeof s.notes === "string" ? s.notes : "",
+    acEvidence: typeof (s as any).acEvidence === "object" && (s as any).acEvidence !== null
+      ? (s as any).acEvidence
+      : {},
+  });
+
   return {
-    executions: file.executions.map((e) => ({
-      ...e,
-      dependencies: Array.isArray(e.dependencies) ? e.dependencies : [],
-      // Stagnation detection defaults for backward compatibility
-      loopCount: typeof (e as any).loopCount === "number" ? (e as any).loopCount : 0,
-      consecutiveNoProgress: typeof (e as any).consecutiveNoProgress === "number" ? (e as any).consecutiveNoProgress : 0,
-      consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
-      lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
-      lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
-      // Launch recovery defaults for backward compatibility (US-006)
-      launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
-      launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
-      // Merge tracking defaults for backward compatibility
-      mergedAt: typeof (e as any).mergedAt === "string" ? parseDate((e as any).mergedAt, "executions.mergedAt") : null,
-      mergeCommitSha: typeof (e as any).mergeCommitSha === "string" ? (e as any).mergeCommitSha : null,
-      createdAt: parseDate(e.createdAt, "executions.createdAt"),
-      updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
-    })),
-    userStories: file.userStories.map((s) => ({
-      ...s,
-      acceptanceCriteria: Array.isArray(s.acceptanceCriteria)
-        ? s.acceptanceCriteria
-        : [],
-      notes: typeof s.notes === "string" ? s.notes : "",
-      acEvidence: typeof (s as any).acEvidence === "object" && (s as any).acEvidence !== null
-        ? (s as any).acEvidence
-        : {},
-    })),
+    executions: file.executions.map(deserializeExecution),
+    userStories: file.userStories.map(deserializeUserStory),
     mergeQueue: file.mergeQueue.map((q) => ({
       ...q,
       createdAt: parseDate(q.createdAt, "mergeQueue.createdAt"),
     })),
+    archivedExecutions: (file.archivedExecutions || []).map(deserializeExecution),
+    archivedUserStories: (file.archivedUserStories || []).map(deserializeUserStory),
   };
 }
 
 function serializeState(state: StateRuntime): StateFileV1 {
+  const serializeExecution = (e: ExecutionRecord) => ({
+    ...e,
+    launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
+    mergedAt: e.mergedAt ? toIso(e.mergedAt) : null,
+    createdAt: toIso(e.createdAt),
+    updatedAt: toIso(e.updatedAt),
+  });
+
   return {
     version: 1,
-    executions: state.executions.map((e) => ({
-      ...e,
-      launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
-      mergedAt: e.mergedAt ? toIso(e.mergedAt) : null,
-      createdAt: toIso(e.createdAt),
-      updatedAt: toIso(e.updatedAt),
-    })),
+    executions: state.executions.map(serializeExecution),
     userStories: state.userStories,
     mergeQueue: state.mergeQueue.map((q) => ({
       ...q,
       createdAt: toIso(q.createdAt),
     })),
+    archivedExecutions: state.archivedExecutions.map(serializeExecution),
+    archivedUserStories: state.archivedUserStories,
   };
 }
 
@@ -612,4 +632,62 @@ export async function resetStagnation(executionId: string): Promise<void> {
     exec.lastError = null;
     exec.updatedAt = new Date();
   });
+}
+
+// =============================================================================
+// ARCHIVE MANAGEMENT
+// =============================================================================
+
+/**
+ * Archive an execution and its associated user stories.
+ * Moves the execution from active to archived state.
+ * Also cleans up any merge queue entries for this execution.
+ */
+export async function archiveExecution(executionId: string): Promise<void> {
+  return mutateState((s) => {
+    const execIndex = s.executions.findIndex((e) => e.id === executionId);
+    if (execIndex === -1) {
+      throw new Error(`No execution found with id: ${executionId}`);
+    }
+
+    // Remove execution from active list and add to archive
+    const [exec] = s.executions.splice(execIndex, 1);
+    s.archivedExecutions.push(exec);
+
+    // Move associated user stories to archive
+    const storiesToArchive = s.userStories.filter((st) => st.executionId === executionId);
+    s.userStories = s.userStories.filter((st) => st.executionId !== executionId);
+    s.archivedUserStories.push(...storiesToArchive);
+
+    // Clean up merge queue entries
+    s.mergeQueue = s.mergeQueue.filter((q) => q.executionId !== executionId);
+  });
+}
+
+/**
+ * List all archived executions.
+ */
+export async function listArchivedExecutions(): Promise<ExecutionRecord[]> {
+  return readState((s) => s.archivedExecutions.slice());
+}
+
+/**
+ * List archived user stories by execution ID.
+ */
+export async function listArchivedUserStoriesByExecutionId(executionId: string): Promise<UserStoryRecord[]> {
+  return readState((s) => s.archivedUserStories.filter((st) => st.executionId === executionId));
+}
+
+/**
+ * Find an archived execution by ID.
+ */
+export async function findArchivedExecutionById(executionId: string): Promise<ExecutionRecord | null> {
+  return readState((s) => s.archivedExecutions.find((e) => e.id === executionId) ?? null);
+}
+
+/**
+ * Find an archived execution by branch name.
+ */
+export async function findArchivedExecutionByBranch(branch: string): Promise<ExecutionRecord | null> {
+  return readState((s) => s.archivedExecutions.find((e) => e.branch === branch) ?? null);
 }
