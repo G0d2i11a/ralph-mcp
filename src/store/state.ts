@@ -21,7 +21,8 @@ export type ExecutionStatus =
   | "completed"
   | "failed"
   | "stopped"
-  | "merging";
+  | "merging"
+  | "merged";    // Final state after successful merge
 
 /**
  * Valid state transitions for ExecutionStatus.
@@ -35,7 +36,8 @@ export const VALID_TRANSITIONS: Record<ExecutionStatus, ExecutionStatus[]> = {
   completed: ["merging"],                                        // only to merging
   failed: ["running", "ready", "stopped"],                       // retry scenarios
   stopped: [],                                                   // terminal state
-  merging: ["completed", "failed"],                              // merge result
+  merging: ["merged", "failed"],                                 // merge result: merged on success, failed on error
+  merged: [],                                                    // terminal state after successful merge
 };
 
 /**
@@ -84,6 +86,9 @@ export interface ExecutionRecord {
   // Launch recovery fields (US-006)
   launchAttemptAt: Date | null; // Last launch attempt timestamp
   launchAttempts: number; // Number of launch attempts
+  // Merge tracking fields
+  mergedAt: Date | null; // Timestamp when successfully merged
+  mergeCommitSha: string | null; // Git commit SHA of the merge
   createdAt: Date;
   updatedAt: Date;
 }
@@ -121,7 +126,7 @@ export interface MergeQueueItem {
 
 interface StateFileV1 {
   version: 1;
-  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null }>;
+  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
 }
@@ -180,6 +185,9 @@ function deserializeState(file: StateFileV1): StateRuntime {
       // Launch recovery defaults for backward compatibility (US-006)
       launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
       launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
+      // Merge tracking defaults for backward compatibility
+      mergedAt: typeof (e as any).mergedAt === "string" ? parseDate((e as any).mergedAt, "executions.mergedAt") : null,
+      mergeCommitSha: typeof (e as any).mergeCommitSha === "string" ? (e as any).mergeCommitSha : null,
       createdAt: parseDate(e.createdAt, "executions.createdAt"),
       updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
     })),
@@ -206,6 +214,7 @@ function serializeState(state: StateRuntime): StateFileV1 {
     executions: state.executions.map((e) => ({
       ...e,
       launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
+      mergedAt: e.mergedAt ? toIso(e.mergedAt) : null,
       createdAt: toIso(e.createdAt),
       updatedAt: toIso(e.updatedAt),
     })),

@@ -82,6 +82,9 @@ export async function createExecutionFromPrd(
     // Launch recovery fields
     launchAttemptAt: null,
     launchAttempts: 0,
+    // Merge tracking fields
+    mergedAt: null,
+    mergeCommitSha: null,
     createdAt: now,
     updatedAt: now,
   });
