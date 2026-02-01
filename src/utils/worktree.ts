@@ -2,6 +2,7 @@ import { execSync, exec } from "child_process";
 import { existsSync, appendFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
+import { RalphConfig, DEFAULT_CONFIG } from "../config/schema.js";
 
 const execAsync = promisify(exec);
 
@@ -16,11 +17,19 @@ export interface WorktreeInfo {
  */
 export async function createWorktree(
   projectRoot: string,
-  branch: string
+  branch: string,
+  config?: RalphConfig
 ): Promise<string> {
+  const worktreeConfig = config?.worktree || DEFAULT_CONFIG.worktree;
+  const mergeConfig = config?.merge || DEFAULT_CONFIG.merge;
+  const branchPrefix = mergeConfig.branchPrefix;
+  const mainBranch = mergeConfig.mainBranch;
+  const worktreeBaseDir = worktreeConfig.baseDir;
+  const worktreePrefix = worktreeConfig.prefix;
+
   // Extract short name from branch (ralph/task1-agent -> task1-agent)
-  const shortName = branch.replace(/^ralph\//, "");
-  const worktreePath = join(projectRoot, ".tmp", "worktrees", `ralph-${shortName}`);
+  const shortName = branch.replace(new RegExp(`^${branchPrefix}`), "");
+  const worktreePath = join(projectRoot, worktreeBaseDir, `${worktreePrefix}${shortName}`);
 
   // Check if worktree already exists
   if (existsSync(worktreePath)) {
@@ -40,7 +49,7 @@ export async function createWorktree(
   } else {
     // Create new branch from main
     await execAsync(
-      `git worktree add -b "${branch}" "${worktreePath}" main`,
+      `git worktree add -b "${branch}" "${worktreePath}" ${mainBranch}`,
       { cwd: projectRoot }
     );
   }
@@ -164,15 +173,24 @@ export async function mergeBranch(
   projectRoot: string,
   branch: string,
   description: string,
-  onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent" = "agent"
+  onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent" = "agent",
+  config?: RalphConfig
 ): Promise<{
   success: boolean;
   commitHash?: string;
   hasConflicts: boolean;
   conflictFiles?: string[];
 }> {
-  // Checkout main and pull
-  await execAsync("git checkout main && git pull", { cwd: projectRoot });
+  const mergeConfig = config?.merge || DEFAULT_CONFIG.merge;
+  const mainBranch = mergeConfig.mainBranch;
+  const remote = mergeConfig.remote;
+
+  // Checkout main and pull (if remote exists)
+  if (remote) {
+    await execAsync(`git checkout ${mainBranch} && git pull ${remote} ${mainBranch}`, { cwd: projectRoot });
+  } else {
+    await execAsync(`git checkout ${mainBranch}`, { cwd: projectRoot });
+  }
 
   // Try to merge
   let mergeStrategy = "";
