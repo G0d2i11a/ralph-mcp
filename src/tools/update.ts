@@ -52,6 +52,48 @@ const hardGatesSchema = z.object({
   }).optional().describe("Build verification result"),
 });
 
+/**
+ * US-003: Schema for scope explanation when changes exceed thresholds.
+ */
+const scopeExplanationSchema = z.array(z.object({
+  file: z.string().describe("Path to the file"),
+  reason: z.string().describe("Why this file is in scope for this story"),
+  lines: z.number().optional().describe("Number of lines changed"),
+})).describe("Explanation for large changes");
+
+/**
+ * US-004: Schema for unexpected file explanation.
+ */
+const unexpectedFileExplanationSchema = z.array(z.object({
+  file: z.string().describe("Path to the unexpected file"),
+  reason: z.string().describe("Why this file needed to be changed"),
+  isNewFile: z.boolean().optional().describe("Whether this is a new file"),
+})).describe("Explanation for files changed outside expectedFiles declaration");
+
+/**
+ * US-003: Scope guardrail thresholds.
+ */
+const SCOPE_THRESHOLDS = {
+  WARN_LINES: 1500,
+  WARN_FILES: 15,
+  HARD_LINES: 3000,
+  HARD_FILES: 25,
+  /** Files to exclude from diff statistics */
+  EXCLUDED_PATTERNS: [
+    /pnpm-lock\.yaml$/,
+    /package-lock\.json$/,
+    /yarn\.lock$/,
+    /\.snap$/,
+    /\.lock$/,
+    /^dist\//,
+    /^build\//,
+    /^\.next\//,
+    /^node_modules\//,
+    /\.min\.js$/,
+    /\.min\.css$/,
+  ],
+};
+
 export const updateInputSchema = z.object({
   branch: z.string().describe("Branch name (e.g., ralph/task1-agent)"),
   storyId: z.string().describe("Story ID (e.g., US-001)"),
@@ -66,6 +108,16 @@ export const updateInputSchema = z.object({
     .describe("Hard gate verification results (typecheck and build must pass for passes=true)"),
   skipHardGates: z.boolean().optional().default(false)
     .describe("Skip hard gate verification (for non-code stories, default: false)"),
+  // US-003: Scope guardrails
+  scopeExplanation: scopeExplanationSchema.optional()
+    .describe("Required when changes exceed warn threshold (>1500 lines or >15 files)"),
+  skipScopeCheck: z.boolean().optional().default(false)
+    .describe("Skip scope guardrail check (for special cases, default: false)"),
+  // US-004: Pre-declaration and diff reconciliation
+  expectedFiles: z.array(z.string()).optional()
+    .describe("Files declared before implementation that are expected to change"),
+  unexpectedFileExplanation: unexpectedFileExplanationSchema.optional()
+    .describe("Explanation for files changed outside expectedFiles declaration"),
 });
 
 export type UpdateInput = z.infer<typeof updateInputSchema>;
@@ -114,6 +166,52 @@ export interface EvidenceValidation {
   overrideReason?: string;
 }
 
+/**
+ * US-003: Scope validation result.
+ */
+export interface ScopeValidation {
+  /** Total lines changed (excluding ignored files) */
+  totalLines: number;
+  /** Total files changed (excluding ignored files) */
+  totalFiles: number;
+  /** Whether warn threshold was exceeded */
+  warnThresholdExceeded: boolean;
+  /** Whether hard threshold was exceeded */
+  hardThresholdExceeded: boolean;
+  /** Whether scope explanation was provided */
+  hasExplanation: boolean;
+  /** Whether the update was rejected due to scope */
+  rejected: boolean;
+  /** Rejection or warning message */
+  message?: string;
+  /** Files that were changed */
+  changedFiles: Array<{ file: string; additions: number; deletions: number }>;
+  /** Files that were excluded from count */
+  excludedFiles: string[];
+}
+
+/**
+ * US-004: Diff reconciliation result.
+ */
+export interface DiffReconciliation {
+  /** Files that were declared in expectedFiles */
+  declaredFiles: string[];
+  /** Files that were actually changed */
+  actualFiles: string[];
+  /** Files changed that were not declared */
+  unexpectedFiles: string[];
+  /** Files declared but not changed */
+  unusedDeclarations: string[];
+  /** Whether explanation was provided for unexpected files */
+  hasExplanation: boolean;
+  /** Divergence percentage (unexpected / actual) */
+  divergencePercent: number;
+  /** Whether divergence exceeds threshold (50%) */
+  highDivergence: boolean;
+  /** Warning or info message */
+  message?: string;
+}
+
 export interface UpdateResult {
   success: boolean;
   branch: string;
@@ -143,6 +241,10 @@ export interface UpdateResult {
   };
   /** US-001: Evidence validation results */
   evidenceValidation?: EvidenceValidation;
+  /** US-003: Scope validation results */
+  scopeValidation?: ScopeValidation;
+  /** US-004: Diff reconciliation results */
+  diffReconciliation?: DiffReconciliation;
 }
 
 function formatDate(date: Date): string {
@@ -370,6 +472,207 @@ function validationToAcEvidence(
   return result;
 }
 
+/**
+ * US-003: Get git diff statistics for the worktree.
+ * Returns lines added/deleted per file, excluding ignored patterns.
+ */
+async function getGitDiffStats(worktreePath: string): Promise<{
+  files: Array<{ file: string; additions: number; deletions: number }>;
+  excludedFiles: string[];
+  totalLines: number;
+  totalFiles: number;
+}> {
+  try {
+    // Get diff stats against the base branch (main or master)
+    const { stdout } = await execAsync(
+      "git diff --numstat HEAD~1 2>/dev/null || git diff --numstat HEAD",
+      { cwd: worktreePath, maxBuffer: 10 * 1024 * 1024 }
+    );
+
+    const files: Array<{ file: string; additions: number; deletions: number }> = [];
+    const excludedFiles: string[] = [];
+    let totalLines = 0;
+    let totalFiles = 0;
+
+    for (const line of stdout.trim().split("\n")) {
+      if (!line.trim()) continue;
+
+      const parts = line.split("\t");
+      if (parts.length < 3) continue;
+
+      const [addStr, delStr, file] = parts;
+      // Binary files show as "-" for additions/deletions
+      const additions = addStr === "-" ? 0 : parseInt(addStr, 10) || 0;
+      const deletions = delStr === "-" ? 0 : parseInt(delStr, 10) || 0;
+
+      // Check if file should be excluded
+      const isExcluded = SCOPE_THRESHOLDS.EXCLUDED_PATTERNS.some((pattern) =>
+        pattern.test(file)
+      );
+
+      if (isExcluded) {
+        excludedFiles.push(file);
+        continue;
+      }
+
+      files.push({ file, additions, deletions });
+      totalLines += additions + deletions;
+      totalFiles++;
+    }
+
+    return { files, excludedFiles, totalLines, totalFiles };
+  } catch (error) {
+    // If git diff fails, return empty stats
+    return { files: [], excludedFiles: [], totalLines: 0, totalFiles: 0 };
+  }
+}
+
+/**
+ * US-003: Validate scope guardrails.
+ * Checks if changes exceed thresholds and requires explanation.
+ */
+async function validateScope(
+  input: UpdateInput,
+  worktreePath: string | null
+): Promise<ScopeValidation> {
+  // Skip if no worktree or explicitly skipped
+  if (!worktreePath || input.skipScopeCheck) {
+    return {
+      totalLines: 0,
+      totalFiles: 0,
+      warnThresholdExceeded: false,
+      hardThresholdExceeded: false,
+      hasExplanation: false,
+      rejected: false,
+      changedFiles: [],
+      excludedFiles: [],
+    };
+  }
+
+  const stats = await getGitDiffStats(worktreePath);
+  const { totalLines, totalFiles, files, excludedFiles } = stats;
+
+  const warnThresholdExceeded =
+    totalLines > SCOPE_THRESHOLDS.WARN_LINES ||
+    totalFiles > SCOPE_THRESHOLDS.WARN_FILES;
+
+  const hardThresholdExceeded =
+    totalLines > SCOPE_THRESHOLDS.HARD_LINES ||
+    totalFiles > SCOPE_THRESHOLDS.HARD_FILES;
+
+  const hasExplanation =
+    input.scopeExplanation !== undefined && input.scopeExplanation.length > 0;
+
+  let rejected = false;
+  let message: string | undefined;
+
+  if (hardThresholdExceeded) {
+    rejected = true;
+    message = `REJECTED: Changes exceed hard threshold (${totalLines} lines, ${totalFiles} files). ` +
+      `Max allowed: ${SCOPE_THRESHOLDS.HARD_LINES} lines or ${SCOPE_THRESHOLDS.HARD_FILES} files. ` +
+      `Please split this story into smaller pieces.`;
+  } else if (warnThresholdExceeded && !hasExplanation) {
+    message = `WARNING: Changes exceed warn threshold (${totalLines} lines, ${totalFiles} files). ` +
+      `Threshold: ${SCOPE_THRESHOLDS.WARN_LINES} lines or ${SCOPE_THRESHOLDS.WARN_FILES} files. ` +
+      `Please provide scopeExplanation for each changed file.`;
+  } else if (warnThresholdExceeded && hasExplanation) {
+    message = `Large change acknowledged (${totalLines} lines, ${totalFiles} files) with explanation.`;
+  }
+
+  return {
+    totalLines,
+    totalFiles,
+    warnThresholdExceeded,
+    hardThresholdExceeded,
+    hasExplanation,
+    rejected,
+    message,
+    changedFiles: files,
+    excludedFiles,
+  };
+}
+
+/**
+ * US-004: Reconcile declared expectedFiles with actual diff.
+ */
+async function reconcileDiff(
+  input: UpdateInput,
+  worktreePath: string | null
+): Promise<DiffReconciliation> {
+  const declaredFiles = input.expectedFiles || [];
+
+  // If no declaration, skip reconciliation
+  if (declaredFiles.length === 0) {
+    return {
+      declaredFiles: [],
+      actualFiles: [],
+      unexpectedFiles: [],
+      unusedDeclarations: [],
+      hasExplanation: false,
+      divergencePercent: 0,
+      highDivergence: false,
+      message: "No expectedFiles declared. Consider declaring files before implementation.",
+    };
+  }
+
+  // Get actual changed files
+  let actualFiles: string[] = [];
+  if (worktreePath) {
+    const stats = await getGitDiffStats(worktreePath);
+    actualFiles = stats.files.map((f) => f.file);
+  }
+
+  // Normalize paths for comparison (remove leading ./ or /)
+  const normalize = (path: string) => path.replace(/^\.?\//, "");
+  const normalizedDeclared = new Set(declaredFiles.map(normalize));
+  const normalizedActual = new Set(actualFiles.map(normalize));
+
+  // Find unexpected files (in actual but not declared)
+  const unexpectedFiles = actualFiles.filter(
+    (f) => !normalizedDeclared.has(normalize(f))
+  );
+
+  // Find unused declarations (declared but not in actual)
+  const unusedDeclarations = declaredFiles.filter(
+    (f) => !normalizedActual.has(normalize(f))
+  );
+
+  const hasExplanation =
+    input.unexpectedFileExplanation !== undefined &&
+    input.unexpectedFileExplanation.length > 0;
+
+  // Calculate divergence
+  const divergencePercent =
+    actualFiles.length > 0
+      ? Math.round((unexpectedFiles.length / actualFiles.length) * 100)
+      : 0;
+
+  const highDivergence = divergencePercent > 50;
+
+  let message: string | undefined;
+  if (unexpectedFiles.length > 0 && !hasExplanation) {
+    message = `${unexpectedFiles.length} file(s) changed outside declaration: ${unexpectedFiles.slice(0, 3).join(", ")}${unexpectedFiles.length > 3 ? "..." : ""}. ` +
+      `Please provide unexpectedFileExplanation.`;
+  } else if (highDivergence) {
+    message = `High divergence (${divergencePercent}%) between declared and actual files. Consider re-evaluating scope.`;
+  } else if (unexpectedFiles.length > 0 && hasExplanation) {
+    message = `${unexpectedFiles.length} unexpected file(s) acknowledged with explanation.`;
+  } else if (unusedDeclarations.length > 0) {
+    message = `${unusedDeclarations.length} declared file(s) were not changed: ${unusedDeclarations.slice(0, 3).join(", ")}${unusedDeclarations.length > 3 ? "..." : ""}`;
+  }
+
+  return {
+    declaredFiles,
+    actualFiles,
+    unexpectedFiles,
+    unusedDeclarations,
+    hasExplanation,
+    divergencePercent,
+    highDivergence,
+    message,
+  };
+}
+
 export async function update(input: UpdateInput): Promise<UpdateResult> {
   // Find execution by branch
   const execution = await findExecutionByBranch(input.branch);
@@ -412,6 +715,28 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       },
     };
   }
+
+  // US-003: Validate scope guardrails
+  const scopeValidation = await validateScope(input, execution.worktreePath);
+
+  // If scope hard threshold exceeded, reject the update
+  if (scopeValidation.rejected) {
+    return {
+      success: false,
+      branch: input.branch,
+      storyId: input.storyId,
+      passes: false,
+      allComplete: false,
+      progress: `Scope exceeded`,
+      addedToMergeQueue: false,
+      triggeredDependents: [],
+      readyDependents: [],
+      scopeValidation,
+    };
+  }
+
+  // US-004: Reconcile declared expectedFiles with actual diff
+  const diffReconciliation = await reconcileDiff(input, execution.worktreePath);
 
   // US-001: Validate evidence before accepting passes=true
   const evidenceValidation = validateEvidence(input, story.acceptanceCriteria);
@@ -587,5 +912,7 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     triggeredDependents,
     readyDependents: triggeredDependents, // Same as triggeredDependents, now marked as ready
     evidenceValidation,
+    scopeValidation,
+    diffReconciliation,
   };
 }
