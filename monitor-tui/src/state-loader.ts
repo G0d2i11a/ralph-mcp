@@ -47,8 +47,10 @@ export class StateLoader {
     let completedStories = 0;
 
     executions.forEach(exec => {
-      totalStories += exec.userStories.length;
-      completedStories += exec.userStories.filter(s => s.status === 'passed').length;
+      if (exec.userStories && Array.isArray(exec.userStories)) {
+        totalStories += exec.userStories.length;
+        completedStories += exec.userStories.filter(s => s.status === 'passed').length;
+      }
     });
 
     return { total: totalStories, completed: completedStories };

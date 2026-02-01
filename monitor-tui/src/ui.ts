@@ -177,15 +177,17 @@ export class MonitorUI {
     executions.forEach(exec => {
       const statusIcon = this.getStatusIcon(exec.status);
       const branchName = exec.branch.replace('ralph/', '');
-      const storyProgress = `${exec.userStories.filter(s => s.status === 'passed').length}/${exec.userStories.length}`;
+
+      const userStories = exec.userStories || [];
+      const storyProgress = `${userStories.filter(s => s.status === 'passed').length}/${userStories.length}`;
 
       const isExpanded = this.expandedBranches.has(exec.branch);
       const expandIcon = isExpanded ? '▼' : '▶';
 
       items.push(`${expandIcon} ${statusIcon} {bold}${branchName}{/bold} [${storyProgress}]`);
 
-      if (isExpanded) {
-        exec.userStories.forEach((story, idx) => {
+      if (isExpanded && userStories.length > 0) {
+        userStories.forEach((story, idx) => {
           const storyIcon = this.getStoryIcon(story.status);
           const storyTitle = story.title || story.id;
           items.push(`    ${storyIcon} ${story.id}: ${storyTitle}`);
@@ -211,7 +213,8 @@ export class MonitorUI {
       logs.push('{gray-fg}No active executions{/gray-fg}');
     } else {
       executions.forEach(exec => {
-        const currentStory = exec.userStories[exec.currentStoryIndex];
+        const userStories = exec.userStories || [];
+        const currentStory = userStories[exec.currentStoryIndex];
         if (currentStory) {
           logs.push(`{cyan-fg}[${exec.branch.replace('ralph/', '')}]{/cyan-fg} ${currentStory.id}: ${currentStory.status}`);
           if (currentStory.notes) {
