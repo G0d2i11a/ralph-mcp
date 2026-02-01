@@ -39,7 +39,14 @@ export interface UpdateResult {
   allComplete: boolean;
   progress: string;
   addedToMergeQueue: boolean;
+  /** @deprecated Use readyDependents instead */
   triggeredDependents: Array<{
+    branch: string;
+    agentPrompt: string | null;
+    blockedReason?: string;
+  }>;
+  /** Dependents that were marked as 'ready' for the Runner to pick up */
+  readyDependents: Array<{
     branch: string;
     agentPrompt: string | null;
     blockedReason?: string;
@@ -148,6 +155,7 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       progress: `Stagnation detected`,
       addedToMergeQueue: false,
       triggeredDependents: [],
+      readyDependents: [],
       stagnation: {
         isStagnant: true,
         type: stagnationResult.type,
@@ -243,12 +251,13 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
   }
 
   // Trigger dependent executions when this PRD completes
+  // Mark dependents as 'ready' so the Runner can pick them up
   const triggeredDependents: Array<{ branch: string; agentPrompt: string | null; blockedReason?: string }> = [];
   if (allComplete) {
     const dependents = await findExecutionsDependingOn(exec.branch);
 
     for (const dep of dependents) {
-      // Skip if already running or completed
+      // Skip if already running, completed, or already ready
       if (dep.status !== "pending") {
         continue;
       }
@@ -257,7 +266,7 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
       const depStatus = await areDependenciesSatisfied(dep);
 
       if (depStatus.satisfied) {
-        // Ensure dependent worktree is up-to-date before starting (best-effort).
+        // Ensure dependent worktree is up-to-date before marking ready (best-effort).
         if (dep.worktreePath) {
           const sync = await syncMainToBranch(dep.worktreePath, dep.branch);
           if (!sync.success) {
@@ -270,10 +279,16 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
           }
         }
 
+        // Mark the dependent as 'ready' for the Runner to pick up
+        await updateExecution(dep.id, {
+          status: "ready",
+          updatedAt: new Date(),
+        });
+
         // Get user stories for this dependent execution
         const depStories = await listUserStoriesByExecutionId(dep.id);
 
-        // Generate agent prompt for the dependent
+        // Generate agent prompt for the dependent (for manual start or logging)
         const agentPrompt = generateAgentPrompt(
           dep.branch,
           dep.description,
@@ -306,5 +321,6 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
     progress: `${completedCount}/${allStories.length} US`,
     addedToMergeQueue,
     triggeredDependents,
+    readyDependents: triggeredDependents, // Same as triggeredDependents, now marked as ready
   };
 }
