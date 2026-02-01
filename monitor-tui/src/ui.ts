@@ -11,6 +11,7 @@ export class MonitorUI {
   private stateLoader: StateLoader;
   private selectedIndex: number = 0;
   private expandedBranches: Set<string> = new Set();
+  private executionRowBranches: string[] = [];
 
   constructor(stateLoader: StateLoader) {
     this.stateLoader = stateLoader;
@@ -48,11 +49,12 @@ export class MonitorUI {
       left: 0,
       width: '100%',
       height: '70%-4',
+      tags: true,
       keys: true,
       vi: true,
       mouse: true,
       scrollbar: {
-        ch: '█',
+        ch: '|',
         style: {
           fg: 'cyan'
         }
@@ -88,7 +90,7 @@ export class MonitorUI {
       },
       scrollable: true,
       scrollbar: {
-        ch: '█',
+        ch: '|',
         style: {
           fg: 'cyan'
         }
@@ -101,7 +103,7 @@ export class MonitorUI {
       left: 0,
       width: '100%',
       height: 1,
-      content: ' [q]uit [r]efresh [space]expand/collapse [↑↓]navigate',
+      content: ' [q]uit [r]efresh [space]expand/collapse [Up/Down or j/k]navigate',
       style: {
         bg: 'blue',
         fg: 'white'
@@ -112,6 +114,8 @@ export class MonitorUI {
     this.screen.append(this.executionList);
     this.screen.append(this.logBox);
     this.screen.append(this.statusBar);
+
+    this.executionList.focus();
   }
 
   private setupKeyBindings() {
@@ -133,17 +137,14 @@ export class MonitorUI {
   }
 
   private toggleExpand() {
-    const state = this.stateLoader.loadState();
-    const executions = Object.values(state.executions);
     const selected = (this.executionList as any).selected || 0;
+    const branch = this.executionRowBranches[selected];
+    if (!branch) return;
 
-    if (selected >= executions.length) return;
-
-    const execution = executions[selected];
-    if (this.expandedBranches.has(execution.branch)) {
-      this.expandedBranches.delete(execution.branch);
+    if (this.expandedBranches.has(branch)) {
+      this.expandedBranches.delete(branch);
     } else {
-      this.expandedBranches.add(execution.branch);
+      this.expandedBranches.add(branch);
     }
 
     this.refresh();
@@ -172,7 +173,9 @@ export class MonitorUI {
 
   private updateExecutionList(state: RalphState) {
     const executions = Object.values(state.executions);
+    const previousSelected = (this.executionList as any).selected || 0;
     const items: string[] = [];
+    const rowBranches: string[] = [];
 
     executions.forEach(exec => {
       const statusIcon = this.getStatusIcon(exec.status);
@@ -185,12 +188,14 @@ export class MonitorUI {
       const expandIcon = isExpanded ? 'v' : '>';
 
       items.push(`${expandIcon} ${statusIcon} {bold}${branchName}{/bold} [${storyProgress}]`);
+      rowBranches.push(exec.branch);
 
       if (isExpanded && userStories.length > 0) {
         userStories.forEach((story, idx) => {
           const storyIcon = this.getStoryIcon(story.status);
           const storyTitle = story.title || story.id;
           items.push(`    ${storyIcon} ${story.id}: ${storyTitle}`);
+          rowBranches.push(exec.branch);
         });
       }
     });
@@ -199,7 +204,13 @@ export class MonitorUI {
       items.push('No executions found. Start a PRD with ralph_start.');
     }
 
+    this.executionRowBranches = rowBranches;
     this.executionList.setItems(items);
+
+    if (items.length > 0) {
+      const nextSelected = Math.max(0, Math.min(previousSelected, items.length - 1));
+      this.executionList.select(nextSelected);
+    }
   }
 
   private updateLogs(state: RalphState) {
