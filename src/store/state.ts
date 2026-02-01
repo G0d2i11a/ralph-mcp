@@ -9,6 +9,15 @@ export const RALPH_DATA_DIR =
 
 const STATE_PATH = join(RALPH_DATA_DIR, "state.json");
 
+/**
+ * Maximum number of archived executions to retain.
+ * Configurable via RALPH_MAX_ARCHIVED environment variable.
+ */
+export const MAX_ARCHIVED_EXECUTIONS = parseInt(
+  process.env.RALPH_MAX_ARCHIVED || "50",
+  10
+);
+
 if (!existsSync(RALPH_DATA_DIR)) {
   mkdirSync(RALPH_DATA_DIR, { recursive: true });
 }
@@ -642,6 +651,7 @@ export async function resetStagnation(executionId: string): Promise<void> {
  * Archive an execution and its associated user stories.
  * Moves the execution from active to archived state.
  * Also cleans up any merge queue entries for this execution.
+ * Enforces retention policy by removing oldest archives when limit is exceeded.
  */
 export async function archiveExecution(executionId: string): Promise<void> {
   return mutateState((s) => {
@@ -661,6 +671,26 @@ export async function archiveExecution(executionId: string): Promise<void> {
 
     // Clean up merge queue entries
     s.mergeQueue = s.mergeQueue.filter((q) => q.executionId !== executionId);
+
+    // Enforce retention policy: remove oldest archives if limit exceeded
+    if (s.archivedExecutions.length > MAX_ARCHIVED_EXECUTIONS) {
+      // Sort by mergedAt (or updatedAt as fallback), oldest first
+      s.archivedExecutions.sort((a, b) => {
+        const aTime = (a.mergedAt || a.updatedAt).getTime();
+        const bTime = (b.mergedAt || b.updatedAt).getTime();
+        return aTime - bTime;
+      });
+
+      // Calculate how many to remove
+      const toRemove = s.archivedExecutions.length - MAX_ARCHIVED_EXECUTIONS;
+      const removedExecutions = s.archivedExecutions.splice(0, toRemove);
+
+      // Remove associated user stories for deleted archives
+      const removedIds = new Set(removedExecutions.map((e) => e.id));
+      s.archivedUserStories = s.archivedUserStories.filter(
+        (st) => !removedIds.has(st.executionId)
+      );
+    }
   });
 }
 
