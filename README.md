@@ -289,21 +289,6 @@ Users can log into their accounts.
 - [ ] Forgot password flow
 ```
 
-### PRD Naming Convention
-
-**IMPORTANT:** PRD file names must use ASCII characters only (English, numbers, hyphens).
-
-✅ Good:
-- `tasks/prd-user-auth.md`
-- `tasks/prd-api-tests-p0.md`
-- `tasks/prd-dual-mode-config.md`
-
-❌ Bad:
-- `tasks/prd-用户认证.md` (Chinese characters)
-- `tasks/prd-配置管理.md` (Non-ASCII)
-
-**Reason:** Terminal UI (ralph-monitor) may not display non-ASCII characters correctly on Windows.
-
 ## Conflict Resolution
 
 `ralph_merge` supports these strategies:
