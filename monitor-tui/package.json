@@ -1,0 +1,30 @@
+{
+  "name": "ralph-monitor-tui",
+  "version": "0.1.0",
+  "description": "Terminal UI for monitoring Ralph MCP executions",
+  "main": "dist/index.js",
+  "bin": {
+    "ralph-monitor": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:prod": "tsc && npm run package",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "package": "npm pack",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["ralph", "mcp", "monitor", "tui"],
+  "author": "ralph-mcp",
+  "license": "MIT",
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "chokidar": "^3.5.3",
+    "@types/blessed": "^0.1.25"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0",
+    "tsx": "^4.7.0"
+  }
+}
