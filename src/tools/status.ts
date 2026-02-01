@@ -4,6 +4,7 @@ import { promisify } from "util";
 import { z } from "zod";
 import {
   listExecutions,
+  listArchivedExecutions,
   listUserStoriesByExecutionId,
   deleteExecution,
   deleteMergeQueueByExecutionId,
@@ -20,7 +21,7 @@ const INTERRUPT_TIMEOUT_MS = 30 * 60 * 1000;
 export const statusInputSchema = z.object({
   project: z.string().optional().describe("Filter by project name"),
   status: z
-    .enum(["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"])
+    .enum(["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging", "merged"])
     .optional()
     .describe("Filter by status"),
   reconcile: z
@@ -28,6 +29,11 @@ export const statusInputSchema = z.object({
     .optional()
     .default(true)
     .describe("Auto-fix status inconsistencies with git (default: true)"),
+  historyLimit: z
+    .number()
+    .optional()
+    .default(10)
+    .describe("Number of recent archived records to include in history (default: 10)"),
 });
 
 export type StatusInput = z.infer<typeof statusInputSchema>;
@@ -58,8 +64,34 @@ export interface ExecutionStatus {
 export interface ReconcileAction {
   branch: string;
   previousStatus: string;
-  action: "deleted" | "skipped" | "marked_interrupted";
+  action: "deleted" | "skipped" | "marked_interrupted" | "archived";
   reason: string;
+}
+
+/**
+ * Summary of an archived execution for history display.
+ */
+export interface ArchivedExecutionSummary {
+  branch: string;
+  description: string;
+  status: string;
+  mergedAt: string | null;
+  mergeCommitSha: string | null;
+  createdAt: string;
+}
+
+/**
+ * Overall state of the Ralph system.
+ */
+export type OverallState = "never_run" | "active" | "all_done";
+
+/**
+ * Statistics about execution history.
+ */
+export interface ExecutionStats {
+  totalExecuted: number;  // Total executions ever (active + archived)
+  totalMerged: number;    // Successfully merged count
+  totalFailed: number;    // Failed count (in archived)
 }
 
 export interface StatusResult {
@@ -73,6 +105,9 @@ export interface StatusResult {
     interrupted: number; // Executions that were interrupted (session closed)
     atRisk: number; // Executions approaching stagnation threshold
   };
+  overallState: OverallState;
+  history: ArchivedExecutionSummary[];
+  stats: ExecutionStats;
   reconciled?: ReconcileAction[];
   suggestions?: string[]; // Suggested actions for the user
 }
@@ -352,9 +387,54 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     ).length,
   };
 
+  // Get archived executions for history and stats
+  const archivedExecutions = await listArchivedExecutions();
+
+  // Calculate overall state
+  let overallState: OverallState;
+  if (allExecutions.length === 0 && archivedExecutions.length === 0) {
+    overallState = "never_run";
+  } else if (allExecutions.some((e) =>
+    e.status === "running" || e.status === "pending" || e.status === "ready" ||
+    e.status === "starting" || e.status === "merging"
+  )) {
+    overallState = "active";
+  } else {
+    overallState = "all_done";
+  }
+
+  // Build history from archived executions (most recent first)
+  const historyLimit = input.historyLimit ?? 10;
+  const sortedArchived = [...archivedExecutions].sort((a, b) => {
+    const aTime = (a.mergedAt || a.updatedAt).getTime();
+    const bTime = (b.mergedAt || b.updatedAt).getTime();
+    return bTime - aTime; // Most recent first
+  });
+
+  const history: ArchivedExecutionSummary[] = sortedArchived
+    .slice(0, historyLimit)
+    .map((e) => ({
+      branch: e.branch,
+      description: e.description,
+      status: e.status,
+      mergedAt: e.mergedAt?.toISOString() || null,
+      mergeCommitSha: e.mergeCommitSha,
+      createdAt: e.createdAt.toISOString(),
+    }));
+
+  // Calculate stats
+  const stats: ExecutionStats = {
+    totalExecuted: allExecutions.length + archivedExecutions.length,
+    totalMerged: archivedExecutions.filter((e) => e.status === "merged").length,
+    totalFailed: archivedExecutions.filter((e) => e.status === "failed" || e.status === "stopped").length,
+  };
+
   const result: StatusResult = {
     executions: executionStatuses,
     summary,
+    overallState,
+    history,
+    stats,
   };
 
   // Only include reconciled if there were actions
