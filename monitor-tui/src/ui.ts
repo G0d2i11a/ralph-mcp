@@ -179,7 +179,10 @@ export class MonitorUI {
 
     executions.forEach(exec => {
       const statusIcon = this.getStatusIcon(exec.status);
-      const branchName = exec.branch.replace('ralph/', '');
+      // Remove 'ralph/' prefix and sanitize for terminal display
+      let branchName = exec.branch.replace('ralph/', '');
+      // Replace non-ASCII characters with safe alternatives
+      branchName = this.sanitizeForTerminal(branchName);
 
       const userStories = exec.userStories || [];
       const storyProgress = `${userStories.filter(s => s.status === 'passed').length}/${userStories.length}`;
@@ -193,7 +196,7 @@ export class MonitorUI {
       if (isExpanded && userStories.length > 0) {
         userStories.forEach((story, idx) => {
           const storyIcon = this.getStoryIcon(story.status);
-          const storyTitle = story.title || story.id;
+          const storyTitle = this.sanitizeForTerminal(story.title || story.id);
           items.push(`    ${storyIcon} ${story.id}: ${storyTitle}`);
           rowBranches.push(exec.branch);
         });
@@ -211,6 +214,15 @@ export class MonitorUI {
       const nextSelected = Math.max(0, Math.min(previousSelected, items.length - 1));
       this.executionList.select(nextSelected);
     }
+  }
+
+  private sanitizeForTerminal(text: string): string {
+    // Replace non-ASCII characters with ASCII equivalents or remove them
+    return text
+      .replace(/[\u4e00-\u9fff]/g, '') // Remove Chinese characters
+      .replace(/[^\x00-\x7F]/g, '') // Remove other non-ASCII
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
   }
 
   private updateLogs(state: RalphState) {
