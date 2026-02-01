@@ -2,11 +2,22 @@ import { execSync, exec } from "child_process";
 import { promisify } from "util";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { RalphConfig, Gate, DEFAULT_CONFIG } from "../config/schema.js";
 
 const execAsync = promisify(exec);
 
+export interface GateResult {
+  id: string;
+  name: string;
+  success: boolean;
+  output: string;
+  durationMs: number;
+}
+
 export interface QualityCheckResult {
   success: boolean;
+  gates: GateResult[];
+  // Legacy fields for backward compatibility
   typeCheck: { success: boolean; output: string };
   build: { success: boolean; output: string };
 }
@@ -23,25 +34,31 @@ export interface SyncResult {
  */
 export async function syncMainToBranch(
   worktreePath: string,
-  branch: string
+  branch: string,
+  config?: RalphConfig
 ): Promise<SyncResult> {
+  const mainBranch = config?.merge?.mainBranch || DEFAULT_CONFIG.merge.mainBranch;
+  const remote = config?.merge?.remote ?? DEFAULT_CONFIG.merge.remote;
+
   try {
-    // Check if origin remote exists
-    let hasOrigin = false;
-    try {
-      const { stdout } = await execAsync("git remote", { cwd: worktreePath });
-      hasOrigin = stdout.includes("origin");
-    } catch {
-      hasOrigin = false;
+    // Check if remote exists (skip if remote is null)
+    let hasRemote = false;
+    if (remote) {
+      try {
+        const { stdout } = await execAsync("git remote", { cwd: worktreePath });
+        hasRemote = stdout.includes(remote);
+      } catch {
+        hasRemote = false;
+      }
     }
 
-    // Fetch latest main only if origin exists
-    if (hasOrigin) {
-      await execAsync("git fetch origin main", { cwd: worktreePath });
+    // Fetch latest main only if remote exists
+    if (hasRemote && remote) {
+      await execAsync(`git fetch ${remote} ${mainBranch}`, { cwd: worktreePath });
     }
 
     // Try to merge main into feature branch
-    const mergeTarget = hasOrigin ? "origin/main" : "main";
+    const mergeTarget = hasRemote && remote ? `${remote}/${mainBranch}` : mainBranch;
     try {
       await execAsync(`git merge ${mergeTarget} --no-edit`, { cwd: worktreePath });
       return {
@@ -81,13 +98,94 @@ export async function syncMainToBranch(
 }
 
 /**
- * Run quality checks (type check and build)
+ * Run a single quality gate
+ */
+async function runGate(
+  worktreePath: string,
+  gate: Gate
+): Promise<GateResult> {
+  const startTime = Date.now();
+  const cwd = gate.cwd ? join(worktreePath, gate.cwd) : worktreePath;
+
+  try {
+    const { stdout, stderr } = await execAsync(gate.command, {
+      cwd,
+      timeout: gate.timeoutMs || 120000,
+    });
+    return {
+      id: gate.id,
+      name: gate.name,
+      success: true,
+      output: stdout || stderr,
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error: unknown) {
+    const execError = error as { stdout?: string; stderr?: string };
+    return {
+      id: gate.id,
+      name: gate.name,
+      success: false,
+      output: execError.stdout || execError.stderr || String(error),
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Run quality checks (configurable gates or legacy type check and build)
  */
 export async function runQualityChecks(
+  worktreePath: string,
+  config?: RalphConfig
+): Promise<QualityCheckResult> {
+  const gates = config?.gates || DEFAULT_CONFIG.gates;
+
+  // If no gates configured, use legacy hardcoded checks
+  if (gates.length === 0) {
+    return runLegacyQualityChecks(worktreePath);
+  }
+
+  // Filter gates that should run pre-merge
+  const preMergeGates = gates.filter((g) => g.when === "pre-merge" || g.when === "always");
+
+  const gateResults: GateResult[] = [];
+  let allSuccess = true;
+
+  for (const gate of preMergeGates) {
+    const result = await runGate(worktreePath, gate);
+    gateResults.push(result);
+
+    if (!result.success && gate.required) {
+      allSuccess = false;
+      break; // Stop on first required gate failure
+    }
+  }
+
+  // Build legacy-compatible result
+  const typeCheckGate = gateResults.find((g) => g.id === "type-check" || g.id === "typecheck");
+  const buildGate = gateResults.find((g) => g.id === "build");
+
+  return {
+    success: allSuccess,
+    gates: gateResults,
+    typeCheck: typeCheckGate
+      ? { success: typeCheckGate.success, output: typeCheckGate.output }
+      : { success: true, output: "" },
+    build: buildGate
+      ? { success: buildGate.success, output: buildGate.output }
+      : { success: true, output: "" },
+  };
+}
+
+/**
+ * Legacy quality checks (hardcoded pnpm commands)
+ */
+async function runLegacyQualityChecks(
   worktreePath: string
 ): Promise<QualityCheckResult> {
   const result: QualityCheckResult = {
     success: false,
+    gates: [],
     typeCheck: { success: false, output: "" },
     build: { success: false, output: "" },
   };
@@ -99,12 +197,26 @@ export async function runQualityChecks(
       timeout: 120000, // 2 minutes
     });
     result.typeCheck = { success: true, output: stdout || stderr };
+    result.gates.push({
+      id: "type-check",
+      name: "Type Check",
+      success: true,
+      output: stdout || stderr,
+      durationMs: 0,
+    });
   } catch (error: unknown) {
     const execError = error as { stdout?: string; stderr?: string };
     result.typeCheck = {
       success: false,
       output: execError.stdout || execError.stderr || String(error),
     };
+    result.gates.push({
+      id: "type-check",
+      name: "Type Check",
+      success: false,
+      output: execError.stdout || execError.stderr || String(error),
+      durationMs: 0,
+    });
     return result;
   }
 
@@ -115,12 +227,26 @@ export async function runQualityChecks(
       timeout: 180000, // 3 minutes
     });
     result.build = { success: true, output: stdout || stderr };
+    result.gates.push({
+      id: "build",
+      name: "Build",
+      success: true,
+      output: stdout || stderr,
+      durationMs: 0,
+    });
   } catch (error: unknown) {
     const execError = error as { stdout?: string; stderr?: string };
     result.build = {
       success: false,
       output: execError.stdout || execError.stderr || String(error),
     };
+    result.gates.push({
+      id: "build",
+      name: "Build",
+      success: false,
+      output: execError.stdout || execError.stderr || String(error),
+      durationMs: 0,
+    });
     return result;
   }
 
@@ -134,8 +260,11 @@ export async function runQualityChecks(
 export function generateCommitMessage(
   branch: string,
   description: string,
-  completedStories: { id: string; title: string }[]
+  completedStories: { id: string; title: string }[],
+  config?: RalphConfig
 ): string {
+  const coAuthor = config?.agent?.coAuthor || DEFAULT_CONFIG.agent.coAuthor;
+
   const storyList = completedStories
     .map((s) => `- ${s.id}: ${s.title}`)
     .join("\n");
@@ -145,7 +274,7 @@ export function generateCommitMessage(
 Completed User Stories:
 ${storyList || "- No stories tracked"}
 
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>`;
+Co-Authored-By: ${coAuthor}`;
 }
 
 /**
