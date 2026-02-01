@@ -9,7 +9,9 @@ import {
   deleteExecution,
   deleteMergeQueueByExecutionId,
   updateExecution,
+  archiveExecution,
   ExecutionRecord,
+  ReconcileReason,
 } from "../store/state.js";
 import { removeWorktree } from "../utils/worktree.js";
 
@@ -207,8 +209,25 @@ function isExecutionInterrupted(exec: ExecutionRecord): {
 }
 
 /**
+ * Check if a branch exists in the repository.
+ */
+async function doesBranchExist(
+  branch: string,
+  projectRoot: string
+): Promise<boolean> {
+  try {
+    await execAsync(`git rev-parse --verify ${branch}`, { cwd: projectRoot });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reconcile execution status with git reality.
- * - If a branch is merged to main but status is not "completed", clean it up.
+ * - If a branch is merged to main, archive with reason "branch_merged".
+ * - If a branch is deleted, mark as failed and archive with reason "branch_deleted".
+ * - If worktree is missing, mark as failed and archive with reason "worktree_missing".
  * - If a running execution has no activity for too long, mark it as interrupted.
  */
 async function reconcileExecutions(
@@ -217,8 +236,8 @@ async function reconcileExecutions(
   const actions: ReconcileAction[] = [];
 
   for (const exec of executions) {
-    // Skip completed or stopped executions
-    if (exec.status === "completed" || exec.status === "stopped") {
+    // Skip already merged or stopped executions
+    if (exec.status === "merged" || exec.status === "stopped") {
       continue;
     }
 
@@ -226,11 +245,8 @@ async function reconcileExecutions(
     const isMerged = await isBranchMergedToMain(exec.branch, exec.projectRoot);
 
     if (isMerged) {
-      // Branch is merged but status doesn't reflect it - clean up
+      // Branch is merged but status doesn't reflect it - archive it
       try {
-        // Remove from merge queue
-        await deleteMergeQueueByExecutionId(exec.id);
-
         // Try to remove worktree if exists
         if (exec.worktreePath) {
           try {
@@ -240,13 +256,21 @@ async function reconcileExecutions(
           }
         }
 
-        // Delete the execution record
-        await deleteExecution(exec.id);
+        // Update status to merged and set reconcile reason
+        await updateExecution(exec.id, {
+          status: "merged",
+          reconcileReason: "branch_merged" as ReconcileReason,
+          mergedAt: new Date(),
+          updatedAt: new Date(),
+        }, { skipTransitionValidation: true });
+
+        // Archive the execution
+        await archiveExecution(exec.id);
 
         actions.push({
           branch: exec.branch,
           previousStatus: exec.status,
-          action: "deleted",
+          action: "archived",
           reason: "Branch already merged to main",
         });
         continue;
@@ -255,7 +279,80 @@ async function reconcileExecutions(
           branch: exec.branch,
           previousStatus: exec.status,
           action: "skipped",
-          reason: `Failed to clean up: ${error instanceof Error ? error.message : String(error)}`,
+          reason: `Failed to archive: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    // Check if branch was deleted
+    const branchExists = await doesBranchExist(exec.branch, exec.projectRoot);
+    if (!branchExists) {
+      try {
+        // Try to remove worktree if exists
+        if (exec.worktreePath) {
+          try {
+            await removeWorktree(exec.worktreePath, exec.projectRoot);
+          } catch {
+            // Worktree might already be gone
+          }
+        }
+
+        // Update status to failed and set reconcile reason
+        await updateExecution(exec.id, {
+          status: "failed",
+          reconcileReason: "branch_deleted" as ReconcileReason,
+          lastError: "Branch was deleted",
+          updatedAt: new Date(),
+        }, { skipTransitionValidation: true });
+
+        // Archive the execution
+        await archiveExecution(exec.id);
+
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "archived",
+          reason: "Branch was deleted",
+        });
+        continue;
+      } catch (error) {
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "skipped",
+          reason: `Failed to archive deleted branch: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    // Check if worktree is missing (but branch exists)
+    if (exec.worktreePath && !existsSync(exec.worktreePath) && exec.status === "running") {
+      try {
+        // Update status to failed and set reconcile reason
+        await updateExecution(exec.id, {
+          status: "failed",
+          reconcileReason: "worktree_missing" as ReconcileReason,
+          lastError: "Worktree directory is missing",
+          worktreePath: null,
+          updatedAt: new Date(),
+        }, { skipTransitionValidation: true });
+
+        // Archive the execution
+        await archiveExecution(exec.id);
+
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "archived",
+          reason: "Worktree directory is missing",
+        });
+        continue;
+      } catch (error) {
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "skipped",
+          reason: `Failed to archive missing worktree: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
     }
