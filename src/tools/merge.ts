@@ -20,6 +20,7 @@ import {
 } from "../utils/merge-helpers.js";
 import { execSync } from "child_process";
 import {
+  archiveExecution,
   deleteMergeQueueByExecutionId,
   findExecutionByBranch,
   findExecutionById,
@@ -225,8 +226,16 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         console.error(`Failed to delete branch ${exec.branch}:`, e);
       }
 
-      // Update status
-      await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+      // Update status to merged and record merge info
+      await updateExecution(exec.id, {
+        status: "merged",
+        mergedAt: new Date(),
+        mergeCommitSha: mergeResult.commitHash || null,
+        updatedAt: new Date(),
+      });
+
+      // Archive the execution (move to archived state)
+      await archiveExecution(exec.id);
 
       return {
         success: true,
@@ -297,7 +306,16 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
                 updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
               }
 
-              await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+              // Update status to merged and record merge info
+              await updateExecution(exec.id, {
+                status: "merged",
+                mergedAt: new Date(),
+                mergeCommitSha: commitHash,
+                updatedAt: new Date(),
+              });
+
+              // Archive the execution
+              await archiveExecution(exec.id);
 
               return {
                 success: true,
@@ -368,7 +386,16 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
             updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
           }
 
-        await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+          // Update status to merged and record merge info
+          await updateExecution(exec.id, {
+            status: "merged",
+            mergedAt: new Date(),
+            mergeCommitSha: commitHash,
+            updatedAt: new Date(),
+          });
+
+          // Archive the execution
+          await archiveExecution(exec.id);
 
           return {
             success: true,
