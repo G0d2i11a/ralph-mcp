@@ -162,8 +162,8 @@ export class MonitorUI {
     const progress = this.stateLoader.getStoryProgress(state);
 
     const content = [
-      `{cyan-fg}{bold}Ralph MCP Monitor{/bold}{/cyan-fg}  {gray-fg}State: ${this.stateLoader.getStateFilePath()}{/gray-fg}`,
-      `PRDs: {green-fg}${stats.completed} completed{/green-fg} | {yellow-fg}${stats.running} running{/yellow-fg} | {red-fg}${stats.failed} failed{/red-fg} | {blue-fg}${stats.merging} merging{/blue-fg}`,
+      `{cyan-fg}{bold}Ralph MCP Monitor{/bold}{/cyan-fg}  State: ${this.stateLoader.getStateFilePath()}`,
+      `PRDs: {green-fg}${stats.completed} done{/green-fg} | {yellow-fg}${stats.running} run{/yellow-fg} | {red-fg}${stats.failed} fail{/red-fg} | {blue-fg}${stats.merging} merge{/blue-fg}`,
       `Stories: {green-fg}${progress.completed}/${progress.total}{/green-fg} (${progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0}%)`
     ].join('\n');
 
@@ -182,7 +182,7 @@ export class MonitorUI {
       const storyProgress = `${userStories.filter(s => s.status === 'passed').length}/${userStories.length}`;
 
       const isExpanded = this.expandedBranches.has(exec.branch);
-      const expandIcon = isExpanded ? '▼' : '▶';
+      const expandIcon = isExpanded ? 'v' : '>';
 
       items.push(`${expandIcon} ${statusIcon} {bold}${branchName}{/bold} [${storyProgress}]`);
 
@@ -196,7 +196,7 @@ export class MonitorUI {
     });
 
     if (items.length === 0) {
-      items.push('{gray-fg}No executions found. Start a PRD with ralph_start.{/gray-fg}');
+      items.push('No executions found. Start a PRD with ralph_start.');
     }
 
     this.executionList.setItems(items);
@@ -210,7 +210,7 @@ export class MonitorUI {
     const logs: string[] = [];
 
     if (executions.length === 0) {
-      logs.push('{gray-fg}No active executions{/gray-fg}');
+      logs.push('No active executions');
     } else {
       executions.forEach(exec => {
         const userStories = exec.userStories || [];
@@ -218,7 +218,7 @@ export class MonitorUI {
         if (currentStory) {
           logs.push(`{cyan-fg}[${exec.branch.replace('ralph/', '')}]{/cyan-fg} ${currentStory.id}: ${currentStory.status}`);
           if (currentStory.notes) {
-            logs.push(`  {gray-fg}${currentStory.notes.slice(0, 100)}...{/gray-fg}`);
+            logs.push(`  ${currentStory.notes.slice(0, 100)}...`);
           }
         }
       });
@@ -229,21 +229,21 @@ export class MonitorUI {
 
   private getStatusIcon(status: string): string {
     switch (status) {
-      case 'running': return '{yellow-fg}🔄{/yellow-fg}';
-      case 'completed': return '{green-fg}✅{/green-fg}';
-      case 'merged': return '{green-fg}✅{/green-fg}';
-      case 'failed': return '{red-fg}❌{/red-fg}';
-      case 'merging': return '{blue-fg}🔀{/blue-fg}';
-      default: return '{gray-fg}⏳{/gray-fg}';
+      case 'running': return '{yellow-fg}RUN{/yellow-fg}';
+      case 'completed': return '{green-fg}OK {/green-fg}';
+      case 'merged': return '{green-fg}OK {/green-fg}';
+      case 'failed': return '{red-fg}ERR{/red-fg}';
+      case 'merging': return '{blue-fg}MRG{/blue-fg}';
+      default: return 'WAIT';
     }
   }
 
   private getStoryIcon(status: string): string {
     switch (status) {
-      case 'running': return '{yellow-fg}▶{/yellow-fg}';
-      case 'passed': return '{green-fg}✓{/green-fg}';
-      case 'failed': return '{red-fg}✗{/red-fg}';
-      default: return '{gray-fg}○{/gray-fg}';
+      case 'running': return '{yellow-fg}>{/yellow-fg}';
+      case 'passed': return '{green-fg}+{/green-fg}';
+      case 'failed': return '{red-fg}x{/red-fg}';
+      default: return 'o';
     }
   }
 
