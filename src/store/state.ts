@@ -59,6 +59,11 @@ export function isValidTransition(from: ExecutionStatus, to: ExecutionStatus): b
 export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 
 /**
+ * Reason for reconciliation (when execution is archived by reconcile).
+ */
+export type ReconcileReason = "branch_merged" | "branch_deleted" | "worktree_missing" | null;
+
+/**
  * Get a human-readable error message for invalid transitions.
  */
 export function getTransitionError(
@@ -98,6 +103,8 @@ export interface ExecutionRecord {
   // Merge tracking fields
   mergedAt: Date | null; // Timestamp when successfully merged
   mergeCommitSha: string | null; // Git commit SHA of the merge
+  // Reconcile tracking
+  reconcileReason: ReconcileReason; // Reason if archived by reconcile
   createdAt: Date;
   updatedAt: Date;
 }
@@ -206,6 +213,8 @@ function deserializeState(file: StateFileV1): StateRuntime {
     // Merge tracking defaults for backward compatibility
     mergedAt: typeof (e as any).mergedAt === "string" ? parseDate((e as any).mergedAt, "executions.mergedAt") : null,
     mergeCommitSha: typeof (e as any).mergeCommitSha === "string" ? (e as any).mergeCommitSha : null,
+    // Reconcile tracking defaults for backward compatibility
+    reconcileReason: (e as any).reconcileReason || null,
     createdAt: parseDate(e.createdAt, "executions.createdAt"),
     updatedAt: parseDate(e.updatedAt, "executions.updatedAt"),
   });

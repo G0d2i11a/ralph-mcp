@@ -85,6 +85,8 @@ export async function createExecutionFromPrd(
     // Merge tracking fields
     mergedAt: null,
     mergeCommitSha: null,
+    // Reconcile tracking
+    reconcileReason: null,
     createdAt: now,
     updatedAt: now,
   });
