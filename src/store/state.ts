@@ -1,13 +1,17 @@
-import { existsSync, mkdirSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { readFile, readdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import * as lockfile from "proper-lockfile";
 
 export const RALPH_DATA_DIR =
   process.env.RALPH_DATA_DIR?.replace("~", homedir()) ||
   join(homedir(), ".ralph");
 
 const STATE_PATH = join(RALPH_DATA_DIR, "state.json");
+const STATE_LOCK_PATH = join(RALPH_DATA_DIR, "state.lock");
+
+export const DEFAULT_MAX_CONCURRENCY = 3;
 
 /**
  * Maximum number of archived executions to retain.
@@ -27,6 +31,7 @@ export type ExecutionStatus =
   | "ready"      // Dependencies satisfied, waiting for Runner to pick up
   | "starting"   // Runner claimed, Agent launching
   | "running"
+  | "interrupted" // Session closed or agent crashed, can auto-retry
   | "completed"
   | "failed"
   | "stopped"
@@ -41,10 +46,11 @@ export const VALID_TRANSITIONS: Record<ExecutionStatus, ExecutionStatus[]> = {
   pending: ["ready", "running", "stopped", "failed"],           // ready when deps satisfied, running if no deps
   ready: ["starting", "stopped", "failed", "pending"],          // starting when Runner claims, back to pending if deps change
   starting: ["running", "ready", "failed", "stopped"],          // running when Agent starts, ready on launch failure (retry)
-  running: ["completed", "failed", "stopped", "merging"],       // normal execution flow
+  running: ["completed", "failed", "stopped", "merging", "interrupted"], // normal execution flow + interrupt detection
+  interrupted: ["ready", "failed"],                              // ready for auto-retry, failed if max retries exceeded
   completed: ["merging"],                                        // only to merging
   failed: ["running", "ready", "stopped"],                       // retry scenarios
-  stopped: [],                                                   // terminal state
+  stopped: ["ready"],                                           // can be retried via ralph_retry
   merging: ["merged", "failed"],                                 // merge result: merged on success, failed on error
   merged: [],                                                    // terminal state after successful merge
 };
@@ -97,6 +103,11 @@ export interface ExecutionRecord {
   consecutiveErrors: number; // Loops with repeated errors
   lastError: string | null; // Last error for comparison
   lastFilesChanged: number; // Files changed in last update
+  // Current activity tracking
+  currentStoryId: string | null; // Story currently being worked on
+  currentStep: string | null; // Current step description (e.g., "implementing", "testing")
+  stepStartedAt: Date | null; // When current step started
+  logPath: string | null; // Path to agent log file for activity monitoring
   // Launch recovery fields (US-006)
   launchAttemptAt: Date | null; // Last launch attempt timestamp
   launchAttempts: number; // Number of launch attempts
@@ -140,14 +151,27 @@ export interface MergeQueueItem {
   createdAt: Date;
 }
 
+export interface RunnerConfigRecord {
+  maxConcurrency: number;
+  updatedAt: Date;
+  reason: string | null;
+}
+
+interface RunnerConfigFileV1 {
+  maxConcurrency: number;
+  updatedAt: string;
+  reason?: string;
+}
+
 interface StateFileV1 {
   version: 1;
-  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null }>;
+  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
   // Archived data for history
-  archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null }>;
+  archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null }>;
   archivedUserStories?: UserStoryRecord[];
+  runnerConfig?: RunnerConfigFileV1;
 }
 
 interface StateRuntime {
@@ -157,6 +181,7 @@ interface StateRuntime {
   // Archived data for history
   archivedExecutions: ExecutionRecord[];
   archivedUserStories: UserStoryRecord[];
+  runnerConfig: RunnerConfigRecord | null;
 }
 
 function parseDate(value: string, fieldName: string): Date {
@@ -171,8 +196,20 @@ function toIso(date: Date): string {
   return date.toISOString();
 }
 
+function clampMaxConcurrency(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_CONCURRENCY;
+  return Math.min(10, Math.max(1, Math.round(value)));
+}
+
 function defaultState(): StateRuntime {
-  return { executions: [], userStories: [], mergeQueue: [], archivedExecutions: [], archivedUserStories: [] };
+  return {
+    executions: [],
+    userStories: [],
+    mergeQueue: [],
+    archivedExecutions: [],
+    archivedUserStories: [],
+    runnerConfig: null,
+  };
 }
 
 function normalizeState(raw: unknown): StateFileV1 {
@@ -194,10 +231,34 @@ function normalizeState(raw: unknown): StateFileV1 {
   if (Array.isArray(obj.mergeQueue)) base.mergeQueue = obj.mergeQueue as StateFileV1["mergeQueue"];
   if (Array.isArray(obj.archivedExecutions)) base.archivedExecutions = obj.archivedExecutions as StateFileV1["archivedExecutions"];
   if (Array.isArray(obj.archivedUserStories)) base.archivedUserStories = obj.archivedUserStories as StateFileV1["archivedUserStories"];
+  if (typeof obj.runnerConfig === "object" && obj.runnerConfig !== null) base.runnerConfig = obj.runnerConfig as StateFileV1["runnerConfig"];
   return base;
 }
 
 function deserializeState(file: StateFileV1): StateRuntime {
+  const deserializeRunnerConfig = (raw: RunnerConfigFileV1 | undefined): RunnerConfigRecord | null => {
+    if (!raw || typeof raw !== "object") return null;
+
+    const maxConcurrencyRaw = (raw as any).maxConcurrency;
+    const maxConcurrency =
+      typeof maxConcurrencyRaw === "number"
+        ? clampMaxConcurrency(maxConcurrencyRaw)
+        : DEFAULT_MAX_CONCURRENCY;
+
+    const updatedAt =
+      typeof (raw as any).updatedAt === "string"
+        ? parseDate((raw as any).updatedAt, "runnerConfig.updatedAt")
+        : new Date(0);
+
+    const reason = typeof (raw as any).reason === "string" ? (raw as any).reason : null;
+
+    return {
+      maxConcurrency,
+      updatedAt,
+      reason,
+    };
+  };
+
   const deserializeExecution = (e: StateFileV1["executions"][0]) => ({
     ...e,
     dependencies: Array.isArray(e.dependencies) ? e.dependencies : [],
@@ -207,6 +268,11 @@ function deserializeState(file: StateFileV1): StateRuntime {
     consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
     lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
     lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
+    // Current activity tracking defaults for backward compatibility
+    currentStoryId: typeof (e as any).currentStoryId === "string" ? (e as any).currentStoryId : null,
+    currentStep: typeof (e as any).currentStep === "string" ? (e as any).currentStep : null,
+    stepStartedAt: typeof (e as any).stepStartedAt === "string" ? parseDate((e as any).stepStartedAt, "executions.stepStartedAt") : null,
+    logPath: typeof (e as any).logPath === "string" ? (e as any).logPath : null,
     // Launch recovery defaults for backward compatibility (US-006)
     launchAttemptAt: typeof (e as any).launchAttemptAt === "string" ? parseDate((e as any).launchAttemptAt, "executions.launchAttemptAt") : null,
     launchAttempts: typeof (e as any).launchAttempts === "number" ? (e as any).launchAttempts : 0,
@@ -239,12 +305,14 @@ function deserializeState(file: StateFileV1): StateRuntime {
     })),
     archivedExecutions: (file.archivedExecutions || []).map(deserializeExecution),
     archivedUserStories: (file.archivedUserStories || []).map(deserializeUserStory),
+    runnerConfig: deserializeRunnerConfig(file.runnerConfig),
   };
 }
 
 function serializeState(state: StateRuntime): StateFileV1 {
   const serializeExecution = (e: ExecutionRecord) => ({
     ...e,
+    stepStartedAt: e.stepStartedAt ? toIso(e.stepStartedAt) : null,
     launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
     mergedAt: e.mergedAt ? toIso(e.mergedAt) : null,
     createdAt: toIso(e.createdAt),
@@ -261,10 +329,44 @@ function serializeState(state: StateRuntime): StateFileV1 {
     })),
     archivedExecutions: state.archivedExecutions.map(serializeExecution),
     archivedUserStories: state.archivedUserStories,
+    runnerConfig: state.runnerConfig
+      ? {
+          maxConcurrency: state.runnerConfig.maxConcurrency,
+          updatedAt: toIso(state.runnerConfig.updatedAt),
+          reason: state.runnerConfig.reason || undefined,
+        }
+      : undefined,
   };
 }
 
 let lock: Promise<void> = Promise.resolve();
+
+function ensureLockFileExists(): void {
+  if (existsSync(STATE_LOCK_PATH)) return;
+  try {
+    writeFileSync(STATE_LOCK_PATH, "", "utf-8");
+  } catch {
+    // Ignore - lock acquisition will fail with a clear error
+  }
+}
+
+async function withFileLock<T>(fn: () => Promise<T>): Promise<T> {
+  ensureLockFileExists();
+  const release = await lockfile.lock(STATE_LOCK_PATH, {
+    retries: { retries: 8, factor: 2, minTimeout: 50, maxTimeout: 2000 },
+    stale: 30000, // Consider lock stale after 30 seconds
+  });
+
+  try {
+    return await fn();
+  } finally {
+    try {
+      await release();
+    } catch {
+      // Ignore unlock errors
+    }
+  }
+}
 
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const previous = lock;
@@ -291,22 +393,133 @@ async function readStateUnlocked(): Promise<StateRuntime> {
 
 async function writeStateUnlocked(state: StateRuntime): Promise<void> {
   const file = serializeState(state);
-  await writeFile(STATE_PATH, JSON.stringify(file, null, 2) + "\n", "utf-8");
+  const content = JSON.stringify(file, null, 2) + "\n";
+
+  // Validate JSON before writing
+  try {
+    JSON.parse(content);
+  } catch (err) {
+    throw new Error(`Invalid JSON generated: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Backup current state.json (if it's valid JSON) before overwriting.
+  // Backup failures must not block the write.
+  const maxBackups = 5;
+  try {
+    if (existsSync(STATE_PATH)) {
+      const existingText = await readFile(STATE_PATH, "utf-8");
+      try {
+        JSON.parse(existingText);
+        const backupPath = join(RALPH_DATA_DIR, `state.json.backup-${Date.now()}`);
+        await writeFile(backupPath, existingText, "utf-8");
+      } catch {
+        // Existing state.json is corrupted/truncated; skip backup.
+      }
+    }
+  } catch {
+    // Ignore backup errors.
+  }
+
+  const tempPath = STATE_PATH + ".tmp";
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      // Atomic write: write to temp file, then rename
+      await writeFile(tempPath, content, "utf-8");
+      renameSync(tempPath, STATE_PATH);
+
+      // Cleanup old backups; failures must not block a successful write.
+      try {
+        const entries = await readdir(RALPH_DATA_DIR, { withFileTypes: true });
+        const backups = entries
+          .filter((e) => e.isFile() && e.name.startsWith("state.json.backup-"))
+          .map((e) => e.name)
+          .sort()
+          .reverse();
+
+        for (const backupName of backups.slice(maxBackups)) {
+          try {
+            unlinkSync(join(RALPH_DATA_DIR, backupName));
+          } catch {
+            // Ignore cleanup errors.
+          }
+        }
+      } catch {
+        // Ignore cleanup errors.
+      }
+      return;
+    } catch (err) {
+      // Clean up temp file on failure
+      try { unlinkSync(tempPath); } catch {}
+
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const retryable = code === "EBUSY" || code === "EPERM";
+      if (!retryable || attempt === 5) throw err;
+
+      const delayMs = Math.min(2000, 50 * 2 ** attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 async function mutateState<T>(mutator: (state: StateRuntime) => T | Promise<T>): Promise<T> {
   return withLock(async () => {
-    const state = await readStateUnlocked();
-    const result = await mutator(state);
-    await writeStateUnlocked(state);
-    return result;
+    return withFileLock(async () => {
+      const state = await readStateUnlocked();
+      const result = await mutator(state);
+      await writeStateUnlocked(state);
+      return result;
+    });
   });
 }
 
 async function readState<T>(reader: (state: StateRuntime) => T | Promise<T>): Promise<T> {
   return withLock(async () => {
-    const state = await readStateUnlocked();
-    return await reader(state);
+    return withFileLock(async () => {
+      const state = await readStateUnlocked();
+      return await reader(state);
+    });
+  });
+}
+
+export async function getRunnerConfig(): Promise<RunnerConfigRecord> {
+  return readState((s) => {
+    if (s.runnerConfig) return s.runnerConfig;
+    return {
+      maxConcurrency: DEFAULT_MAX_CONCURRENCY,
+      updatedAt: new Date(0),
+      reason: null,
+    };
+  });
+}
+
+export async function ensureRunnerConfigInitialized(
+  defaultMaxConcurrency: number = DEFAULT_MAX_CONCURRENCY
+): Promise<RunnerConfigRecord> {
+  return mutateState((s) => {
+    if (s.runnerConfig) return s.runnerConfig;
+
+    s.runnerConfig = {
+      maxConcurrency: clampMaxConcurrency(defaultMaxConcurrency),
+      updatedAt: new Date(),
+      reason: null,
+    };
+
+    return s.runnerConfig;
+  });
+}
+
+export async function setRunnerMaxConcurrency(
+  maxConcurrency: number,
+  reason?: string
+): Promise<RunnerConfigRecord> {
+  return mutateState((s) => {
+    s.runnerConfig = {
+      maxConcurrency: clampMaxConcurrency(maxConcurrency),
+      updatedAt: new Date(),
+      reason: reason || null,
+    };
+
+    return s.runnerConfig;
   });
 }
 
@@ -441,6 +654,7 @@ export async function findExecutionsDependingOn(branch: string): Promise<Executi
 
 /**
  * Check if all dependencies of an execution are completed.
+ * Checks both active executions (status: "completed") and archived executions (status: "merged").
  */
 export async function areDependenciesSatisfied(execution: ExecutionRecord): Promise<{
   satisfied: boolean;
@@ -456,12 +670,22 @@ export async function areDependenciesSatisfied(execution: ExecutionRecord): Prom
     const completed: string[] = [];
 
     for (const depBranch of execution.dependencies) {
+      // Check active executions first
       const depExec = s.executions.find((e) => e.branch === depBranch);
       if (depExec && depExec.status === "completed") {
         completed.push(depBranch);
-      } else {
-        pending.push(depBranch);
+        continue;
       }
+
+      // Check archived executions (merged PRDs are archived)
+      const archivedExec = s.archivedExecutions.find((e) => e.branch === depBranch);
+      if (archivedExec && (archivedExec.status === "merged" || archivedExec.status === "completed")) {
+        completed.push(depBranch);
+        continue;
+      }
+
+      // Dependency not satisfied
+      pending.push(depBranch);
     }
 
     return {
@@ -608,6 +832,21 @@ export async function recordLoopResult(
       consecutiveErrors: exec.consecutiveErrors,
       lastError: exec.lastError,
     };
+
+    // Check if all stories are complete before marking as failed
+    const stories = s.userStories.filter((st) => st.executionId === executionId);
+    const allComplete = stories.length > 0 && stories.every((st) => st.passes);
+
+    if (allComplete) {
+      // All stories done - set to completed, not failed
+      exec.status = "completed";
+      return {
+        isStagnant: false,
+        type: null,
+        message: "All stories complete",
+        metrics,
+      };
+    }
 
     if (exec.consecutiveNoProgress >= STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD) {
       exec.status = "failed";
