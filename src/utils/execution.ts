@@ -8,6 +8,7 @@ import { createWorktree } from "./worktree.js";
 import {
   type ConflictStrategy,
   type ExecutionStatus,
+  findArchivedExecutionByBranch,
   findExecutionByBranch,
   insertExecutionAtomic,
 } from "../store/state.js";
@@ -76,10 +77,21 @@ export interface CreateExecutionResult {
 export async function createExecutionFromPrd(
   input: CreateExecutionParams
 ): Promise<CreateExecutionResult> {
+  // Only check active executions - archived ones (completed/merged) can be re-executed
   const existing = await findExecutionByBranch(input.prd.branchName);
   if (existing) {
     throw new Error(
-      `Execution already exists for branch ${input.prd.branchName}. Use ralph_get to check status or ralph_stop to stop it.`
+      `Execution already exists for branch ${input.prd.branchName} (status: ${existing.status}). ` +
+        `Use ralph_get to check status or ralph_stop to stop it.`
+    );
+  }
+
+  // For failed/stopped archives, suggest using ralph_retry instead of creating new
+  const archived = await findArchivedExecutionByBranch(input.prd.branchName);
+  if (archived && (archived.status === "failed" || archived.status === "stopped")) {
+    throw new Error(
+      `Found archived ${archived.status} execution for branch ${input.prd.branchName}. ` +
+        `Use ralph_retry to resume it, or ralph_stop --deleteRecord to remove it first.`
     );
   }
 
