@@ -3,6 +3,7 @@ import {
   updateExecution,
   findExecutionByBranch,
   ExecutionRecord,
+  areDependenciesSatisfied,
 } from "./store/state.js";
 import { claimReady } from "./tools/claim-ready.js";
 import { setAgentId } from "./tools/set-agent-id.js";
@@ -27,12 +28,13 @@ export interface RunnerConfig {
 export interface LaunchResult {
   success: boolean;
   agentTaskId?: string;
+  logPath?: string | null;
   error?: string;
 }
 
 /** Launcher interface - implemented by launcher.ts */
 export interface AgentLauncher {
-  launch(prompt: string, cwd: string): Promise<LaunchResult>;
+  launch(prompt: string, cwd: string, executionId?: string): Promise<LaunchResult>;
 }
 
 /**
@@ -44,6 +46,7 @@ export class Runner {
   private running: boolean = false;
   private pollTimer: NodeJS.Timeout | null = null;
   private activeLaunches: Set<string> = new Set();
+  private warnedOverConcurrency: boolean = false;
 
   constructor(config: Partial<RunnerConfig>, launcher: AgentLauncher) {
     this.config = {
@@ -118,6 +121,9 @@ export class Runner {
       // First, check for timed-out starting PRDs
       await this.recoverTimedOutPrds();
 
+      // Promote pending PRDs whose dependencies are now satisfied
+      await this.promotePendingPrds();
+
       // Then process ready PRDs
       await this.processReadyPrds();
     } catch (error) {
@@ -127,6 +133,39 @@ export class Runner {
     // Schedule next poll
     if (this.running) {
       this.pollTimer = setTimeout(() => this.poll(), this.config.interval);
+    }
+  }
+
+  /**
+   * Promote `pending` executions to `ready` once dependencies are satisfied.
+   *
+   * This enables the Runner to unblock queued PRDs as soon as their dependency PRDs complete.
+   */
+  async promotePendingPrds(): Promise<void> {
+    const executions = await listExecutions();
+    const pending = executions.filter((e) => e.status === "pending" && Array.isArray(e.dependencies) && e.dependencies.length > 0);
+
+    for (const exec of pending) {
+      try {
+        const depStatus = await areDependenciesSatisfied({
+          dependencies: exec.dependencies,
+          projectRoot: exec.projectRoot,
+          prdPath: exec.prdPath,
+        });
+
+        if (!depStatus.satisfied) {
+          continue;
+        }
+
+        await updateExecution(exec.id, {
+          status: "ready",
+          updatedAt: new Date(),
+        });
+
+        this.log("info", `Promoted ${exec.branch} from pending -> ready (deps satisfied)`);
+      } catch (error) {
+        this.log("warn", `Failed to promote ${exec.branch}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 
@@ -141,6 +180,8 @@ export class Runner {
     const timedOutPrds = executions.filter((e) => {
       if (e.status !== "starting") return false;
       if (!e.launchAttemptAt) return false;
+      // Don't time out PRDs that this Runner is actively launching.
+      if (this.activeLaunches.has(e.branch)) return false;
 
       const elapsed = now - e.launchAttemptAt.getTime();
       return elapsed > this.config.launchTimeout;
@@ -180,6 +221,30 @@ export class Runner {
     // Get all executions
     const executions = await listExecutions();
 
+    // Enforce effective concurrency across the whole system (not just this Runner instance):
+    // - running: agents already active
+    // - starting: claimed by any Runner, agent launching
+    const globalActive = executions.filter((e) => e.status === "running" || e.status === "starting").length;
+    const localCountedInState = executions.filter(
+      (e) =>
+        this.activeLaunches.has(e.branch) &&
+        (e.status === "running" || e.status === "starting")
+    ).length;
+    const localPendingClaims = this.activeLaunches.size - localCountedInState;
+    const effectiveInUse = globalActive + Math.max(0, localPendingClaims);
+
+    if (globalActive > this.config.concurrency) {
+      if (!this.warnedOverConcurrency) {
+        this.warnedOverConcurrency = true;
+        this.log(
+          "warn",
+          `Global running/starting (${globalActive}) exceeds configured concurrency (${this.config.concurrency}). Runner will pause launching.`
+        );
+      }
+    } else {
+      this.warnedOverConcurrency = false;
+    }
+
     // Filter for ready status
     const readyPrds = executions.filter((e) => e.status === "ready");
 
@@ -190,11 +255,32 @@ export class Runner {
     this.log("info", `Found ${readyPrds.length} ready PRD(s)`);
 
     // Calculate available slots
-    const availableSlots = this.config.concurrency - this.activeLaunches.size;
+    const availableSlots = this.config.concurrency - effectiveInUse;
     if (availableSlots <= 0) {
-      this.log("info", `No available slots (${this.activeLaunches.size}/${this.config.concurrency} in use)`);
+      this.log("info", `No available slots (${effectiveInUse}/${this.config.concurrency} in use)`);
       return;
     }
+
+    const priorityRank = (priority: ExecutionRecord["priority"]): number => {
+      switch (priority) {
+        case "P0":
+          return 0;
+        case "P1":
+          return 1;
+        case "P2":
+          return 2;
+        default:
+          return 1;
+      }
+    };
+
+    // Prefer higher priority first; tie-break by oldest createdAt.
+    readyPrds.sort((a, b) => {
+      const pa = priorityRank(a.priority);
+      const pb = priorityRank(b.priority);
+      if (pa !== pb) return pa - pb;
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
 
     // Process PRDs up to available slots
     const toProcess = readyPrds.slice(0, availableSlots);
@@ -235,7 +321,8 @@ export class Runner {
       // Launch the agent
       const launchResult = await this.launcher.launch(
         claimResult.agentPrompt!,
-        claimResult.worktreePath!
+        claimResult.worktreePath!,
+        prd.id
       );
 
       if (!launchResult.success) {
@@ -253,10 +340,10 @@ export class Runner {
 
       // Update execution with agent ID and set to running
       const agentTaskId = launchResult.agentTaskId!;
-      await setAgentId({ branch, agentTaskId });
-      await updateExecution(prd.id, {
-        status: "running",
-        updatedAt: new Date(),
+      await setAgentId({
+        branch,
+        agentTaskId,
+        logPath: launchResult.logPath ?? null,
       });
 
       this.log("info", `Successfully started ${branch} (agent: ${agentTaskId})`);

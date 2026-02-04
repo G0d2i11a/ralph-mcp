@@ -5,6 +5,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { spawn, ChildProcess } from "child_process";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 import { start, startInputSchema } from "./tools/start.js";
 import { batchStart, batchStartInputSchema } from "./tools/batch-start.js";
@@ -18,6 +21,7 @@ import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-s
 import { retry, retryInputSchema } from "./tools/retry.js";
 import { doctor, doctorInputSchema } from "./tools/doctor.js";
 import { claimReady, claimReadyInputSchema } from "./tools/claim-ready.js";
+import { setConcurrency, setConcurrencyInputSchema } from "./tools/set-concurrency.js";
 
 const server = new Server(
   {
@@ -468,6 +472,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["branch"],
         },
       },
+      {
+        name: "ralph_set_concurrency",
+        description:
+          "Set maximum concurrent PRD executions at runtime. The Runner will apply the change on its next poll cycle.",
+        annotations: {
+          title: "Set Concurrency",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            maxConcurrent: {
+              type: "number",
+              description: "Maximum concurrent PRD executions (1-10)",
+              minimum: 1,
+              maximum: 10,
+            },
+            reason: {
+              type: "string",
+              description: "Optional reason for changing concurrency",
+            },
+          },
+          required: ["maxConcurrent"],
+        },
+      },
     ],
   };
 });
@@ -519,6 +551,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "ralph_claim_ready":
         result = await claimReady(claimReadyInputSchema.parse(args));
         break;
+      case "ralph_set_concurrency":
+        result = await setConcurrency(setConcurrencyInputSchema.parse(args));
+        break;
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -546,10 +581,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // Start server
+let runnerProcess: ChildProcess | null = null;
+
+function startRunner(): void {
+  // Get the directory of the current module
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const runnerPath = join(__dirname, "runner-cli.js");
+
+  // Check if RALPH_AUTO_RUNNER is explicitly disabled
+  if (process.env.RALPH_AUTO_RUNNER === "false") {
+    console.error("Ralph Runner auto-start disabled (RALPH_AUTO_RUNNER=false)");
+    return;
+  }
+
+  try {
+    runnerProcess = spawn("node", [runnerPath], {
+      stdio: ["ignore", "ignore", "ignore"],
+      detached: false,
+      env: { ...process.env, RALPH_RUNNER_SPAWNED: "true" },
+    });
+
+    runnerProcess.on("error", (err) => {
+      console.error("Failed to start Ralph Runner:", err.message);
+    });
+
+    runnerProcess.on("exit", (code) => {
+      if (code !== 0 && code !== null) {
+        console.error(`Ralph Runner exited with code ${code}`);
+      }
+      runnerProcess = null;
+    });
+
+    console.error("Ralph Runner started automatically");
+  } catch (err) {
+    console.error("Failed to spawn Ralph Runner:", err);
+  }
+}
+
+function stopRunner(): void {
+  if (runnerProcess) {
+    runnerProcess.kill();
+    runnerProcess = null;
+    console.error("Ralph Runner stopped");
+  }
+}
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Ralph MCP Server started");
+
+  // Auto-start Runner
+  startRunner();
+
+  // Cleanup on exit
+  process.on("SIGINT", () => {
+    stopRunner();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    stopRunner();
+    process.exit(0);
+  });
 }
 
 main().catch((error) => {

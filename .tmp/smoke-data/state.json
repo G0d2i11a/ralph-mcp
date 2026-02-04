@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "executions": [],
+  "userStories": [],
+  "mergeQueue": [],
+  "archivedExecutions": [],
+  "archivedUserStories": [],
+  "runnerConfig": {
+    "maxConcurrency": 4,
+    "updatedAt": "2026-02-02T17:57:34.843Z",
+    "reason": "smoke"
+  }
+}

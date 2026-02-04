@@ -1,14 +1,49 @@
 import { randomUUID } from "crypto";
 import { basename } from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
 import type { ParsedPrd } from "./prd-parser.js";
+import { DEFAULT_CONFIG } from "../config/schema.js";
 import { createWorktree } from "./worktree.js";
 import {
   type ConflictStrategy,
   type ExecutionStatus,
   findExecutionByBranch,
-  insertExecution,
-  insertUserStories,
+  insertExecutionAtomic,
 } from "../store/state.js";
+
+const execAsync = promisify(exec);
+
+async function doesBranchExist(projectRoot: string, branch: string): Promise<boolean> {
+  try {
+    await execAsync(`git rev-parse --verify "${branch}"`, { cwd: projectRoot });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureBranchExists(
+  projectRoot: string,
+  branch: string,
+  baseRef: string
+): Promise<void> {
+  if (await doesBranchExist(projectRoot, branch)) return;
+  await execAsync(`git branch "${branch}" "${baseRef}"`, { cwd: projectRoot });
+}
+
+async function getBranchHeadSha(
+  projectRoot: string,
+  branch: string
+): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(`git rev-parse --verify "${branch}"`, { cwd: projectRoot });
+    const sha = stdout.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface CreatedStorySummary {
   storyId: string;
@@ -52,6 +87,17 @@ export async function createExecutionFromPrd(
   let worktreePath: string | null = null;
   if (input.worktree) {
     worktreePath = await createWorktree(input.projectRoot, input.prd.branchName);
+  } else {
+    const mainBranch = DEFAULT_CONFIG.merge.mainBranch;
+    await ensureBranchExists(input.projectRoot, input.prd.branchName, mainBranch);
+  }
+
+  const baseCommitSha = await getBranchHeadSha(input.projectRoot, input.prd.branchName);
+  if (!baseCommitSha) {
+    throw new Error(
+      `Failed to resolve baseCommitSha for branch ${input.prd.branchName}. ` +
+        `Ensure ${input.projectRoot} is a git repository and the branch can be created.`
+    );
   }
 
   // Create execution record
@@ -59,14 +105,16 @@ export async function createExecutionFromPrd(
   const now = new Date();
   const projectName = basename(input.projectRoot);
 
-  await insertExecution({
+  const executionRecord = {
     id: executionId,
     project: projectName,
     branch: input.prd.branchName,
     description: input.prd.description,
+    priority: input.prd.priority ?? "P1",
     prdPath: input.prdPath,
     projectRoot: input.projectRoot,
     worktreePath: worktreePath,
+    baseCommitSha,
     status: input.status ?? "pending",
     agentTaskId: null,
     onConflict: input.onConflict,
@@ -79,6 +127,12 @@ export async function createExecutionFromPrd(
     consecutiveErrors: 0,
     lastError: null,
     lastFilesChanged: 0,
+    lastProgressAt: now,
+    // Current activity tracking
+    currentStoryId: null,
+    currentStep: null,
+    stepStartedAt: null,
+    logPath: null,
     // Launch recovery fields
     launchAttemptAt: null,
     launchAttempts: 0,
@@ -89,7 +143,7 @@ export async function createExecutionFromPrd(
     reconcileReason: null,
     createdAt: now,
     updatedAt: now,
-  });
+  };
 
   // Create user story records
   const storyRecords = input.prd.userStories.map((story) => ({
@@ -105,9 +159,7 @@ export async function createExecutionFromPrd(
     acEvidence: {} as Record<string, import("../store/state.js").AcEvidence>,
   }));
 
-  if (storyRecords.length > 0) {
-    await insertUserStories(storyRecords);
-  }
+  await insertExecutionAtomic(executionRecord, storyRecords);
 
   return {
     executionId,

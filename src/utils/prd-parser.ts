@@ -14,6 +14,7 @@ export interface ParsedPrd {
   title: string;
   description: string;
   branchName: string;
+  priority: "P0" | "P1" | "P2";
   userStories: ParsedUserStory[];
   dependencies: string[]; // Branch names this PRD depends on
   frontmatter: Record<string, unknown>; // Raw frontmatter for config overrides
@@ -31,7 +32,16 @@ export function parsePrdFile(filePath: string, config?: RalphConfig): ParsedPrd 
     return parsePrdJson(content, config);
   }
 
-  return parsePrdMarkdown(content, config);
+  return parsePrdMarkdown(content, filePath, config);
+}
+
+function parsePrdPriority(value: unknown): "P0" | "P1" | "P2" {
+  if (typeof value !== "string") return "P1";
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "P0" || normalized === "P1" || normalized === "P2") {
+    return normalized;
+  }
+  return "P1";
 }
 
 function parsePrdJson(content: string, config?: RalphConfig): ParsedPrd {
@@ -42,6 +52,7 @@ function parsePrdJson(content: string, config?: RalphConfig): ParsedPrd {
     title: data.description || data.title || "Untitled PRD",
     description: data.description || "",
     branchName: data.branchName || `${branchPrefix}unnamed`,
+    priority: parsePrdPriority((data as Record<string, unknown>).priority),
     userStories: (data.userStories || []).map(
       (us: Record<string, unknown>, index: number) => ({
         id: (us.id as string) || `US-${String(index + 1).padStart(3, "0")}`,
@@ -56,7 +67,7 @@ function parsePrdJson(content: string, config?: RalphConfig): ParsedPrd {
   };
 }
 
-function parsePrdMarkdown(content: string, config?: RalphConfig): ParsedPrd {
+function parsePrdMarkdown(content: string, filePath: string, config?: RalphConfig): ParsedPrd {
   const branchPrefix = config?.merge?.branchPrefix || DEFAULT_CONFIG.merge.branchPrefix;
 
   // Normalize line endings (CRLF -> LF)
@@ -69,9 +80,14 @@ function parsePrdMarkdown(content: string, config?: RalphConfig): ParsedPrd {
   const title =
     (frontmatter.title as string) || titleMatch?.[1] || "Untitled PRD";
 
-  // Extract branch name from frontmatter or generate from title
-  const branchName =
-    (frontmatter.branch as string) || generateBranchName(title, branchPrefix);
+  // Extract branch name: prioritize frontmatter, then use filename (not title!)
+  let branchName = frontmatter.branch as string;
+  if (!branchName) {
+    // Generate from filename instead of title to avoid English/Chinese mismatch
+    const basename = filePath.replace(/\\/g, "/").split("/").pop() || "";
+    const slug = basename.replace(/\.md$/i, "").replace(/\.json$/i, "");
+    branchName = `${branchPrefix}${slug}`;
+  }
 
   // Extract description
   const descMatch = body.match(
@@ -79,7 +95,7 @@ function parsePrdMarkdown(content: string, config?: RalphConfig): ParsedPrd {
   );
   const description = descMatch?.[1]?.trim() || title;
 
-  // Extract dependencies from frontmatter or body
+  // Extract dependencies from frontmatter
   const dependencies = extractDependencies(frontmatter, body, branchPrefix);
 
   // Extract user stories
@@ -89,6 +105,7 @@ function parsePrdMarkdown(content: string, config?: RalphConfig): ParsedPrd {
     title,
     description,
     branchName,
+    priority: parsePrdPriority((frontmatter as Record<string, unknown>).priority),
     userStories,
     dependencies,
     frontmatter,
@@ -96,10 +113,9 @@ function parsePrdMarkdown(content: string, config?: RalphConfig): ParsedPrd {
 }
 
 /**
- * Extract dependencies from frontmatter or body.
+ * Extract dependencies from frontmatter only.
  * Supports:
  * - Frontmatter: `dependencies: [ralph/prd-a, ralph/prd-b]`
- * - Body section: `## Dependencies\n- depends_on: prd-a.md`
  */
 function extractDependencies(
   frontmatter: Record<string, unknown>,
@@ -108,30 +124,11 @@ function extractDependencies(
 ): string[] {
   const deps: string[] = [];
 
-  // From frontmatter (array of branch names)
+  // ONLY from frontmatter (array of branch names or PRD filenames)
   if (Array.isArray(frontmatter.dependencies)) {
     for (const dep of frontmatter.dependencies) {
       if (typeof dep === "string" && dep.trim()) {
         deps.push(normalizeDependency(dep.trim(), branchPrefix));
-      }
-    }
-  }
-
-  // From body: ## Dependencies section
-  const depsSection = body.match(
-    /##\s*(?:Dependencies|依赖)\s*\n([\s\S]*?)(?=\n##[^#]|$)/i
-  );
-  if (depsSection) {
-    // Match patterns like:
-    // - depends_on: prd-shared-logic.md
-    // - ralph/prd-shared-logic
-    // - prd-shared-logic
-    const depPattern = /[-*]\s*(?:depends_on:\s*)?(.+?)(?:\n|$)/gi;
-    let match;
-    while ((match = depPattern.exec(depsSection[1])) !== null) {
-      const dep = match[1].trim();
-      if (dep && !dep.startsWith("#")) {
-        deps.push(normalizeDependency(dep, branchPrefix));
       }
     }
   }
@@ -142,20 +139,28 @@ function extractDependencies(
 /**
  * Normalize dependency to branch name format.
  * - "prd-shared-logic.md" -> "ralph/prd-shared-logic"
+ * - "prd-shared-logic.json" -> "ralph/prd-shared-logic"
  * - "ralph/prd-shared-logic" -> "ralph/prd-shared-logic"
  * - "prd-shared-logic" -> "ralph/prd-shared-logic"
+ * - "tasks/prd-shared-logic.md" -> "ralph/prd-shared-logic"
  */
 function normalizeDependency(dep: string, branchPrefix: string = "ralph/"): string {
-  // Remove .md extension if present
-  dep = dep.replace(/\.md$/i, "");
-
-  // If already has the branch prefix, return as-is
+  // If it's already a branch name, normalize extensions only (legacy configs sometimes include ".md"/".json")
   if (dep.startsWith(branchPrefix)) {
-    return dep;
+    return dep.replace(/\.md$/i, "").replace(/\.json$/i, "");
+  }
+
+  // Normalize file paths (tasks/prd-x.md, ./tasks/prd-x.md, Windows backslashes)
+  const normalizedPath = dep.replace(/\\/g, "/").replace(/\.md$/i, "").replace(/\.json$/i, "");
+  if (normalizedPath.includes("/")) {
+    const slug = normalizedPath.split("/").filter(Boolean).pop();
+    if (slug) {
+      return `${branchPrefix}${slug}`;
+    }
   }
 
   // Add branch prefix
-  return `${branchPrefix}${dep}`;
+  return `${branchPrefix}${normalizedPath}`;
 }
 
 function extractUserStories(content: string): ParsedUserStory[] {

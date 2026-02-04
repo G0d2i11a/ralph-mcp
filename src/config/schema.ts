@@ -163,6 +163,66 @@ export const AgentConfigSchema = z.object({
         .describe("Maximum loops per story"),
     })
     .default({}),
+  staleDetection: z
+    .object({
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe("Enable multi-signal stale detection for long-running tasks"),
+      timeoutsMs: z
+        .object({
+          implementing: z
+            .number()
+            .default(30 * 60 * 1000)
+            .describe("Stale timeout for implementation work (default: 30m)"),
+          building: z
+            .number()
+            .default(60 * 60 * 1000)
+            .describe("Stale timeout for builds (default: 60m)"),
+          testing: z
+            .number()
+            .default(90 * 60 * 1000)
+            .describe("Stale timeout for tests (default: 90m)"),
+          verifying: z
+            .number()
+            .default(90 * 60 * 1000)
+            .describe("Stale timeout for verification (default: 90m)"),
+          unknown: z
+            .number()
+            .default(30 * 60 * 1000)
+            .describe("Fallback stale timeout when task type is unknown (default: 30m)"),
+        })
+        .default({}),
+      signals: z
+        .object({
+          gitCommits: z
+            .boolean()
+            .default(true)
+            .describe("Use git commit timestamps as an activity signal"),
+          fileChanges: z
+            .boolean()
+            .default(true)
+            .describe("Use changed file mtimes as an activity signal"),
+          logMtime: z
+            .boolean()
+            .default(true)
+            .describe("Use agent log file mtime as an activity signal"),
+          stateUpdatedAt: z
+            .boolean()
+            .default(true)
+            .describe("Use execution.updatedAt as an activity signal"),
+        })
+        .default({}),
+      maxFilesToStat: z
+        .number()
+        .default(200)
+        .describe("Max changed files to stat for mtime-based detection (default: 200)"),
+      logTailBytes: z
+        .number()
+        .default(20_000)
+        .describe("How many bytes of agent log to read for task inference (default: 20KB)"),
+    })
+    .default({}),
 });
 
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;

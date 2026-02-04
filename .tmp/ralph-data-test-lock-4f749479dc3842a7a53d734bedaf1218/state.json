@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "executions": [],
+  "userStories": [],
+  "mergeQueue": [],
+  "archivedExecutions": [],
+  "archivedUserStories": [],
+  "runnerConfig": {
+    "maxConcurrency": 10,
+    "updatedAt": "2026-02-02T18:08:50.394Z",
+    "reason": "child-3"
+  }
+}

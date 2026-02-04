@@ -5,9 +5,11 @@ import { existsSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getConfig } from "../config/loader.js";
 import {
   areDependenciesSatisfied,
   findExecutionByBranch,
+  restoreArchivedExecutionByBranch,
   findExecutionsDependingOn,
   findMergeQueueItemByExecutionId,
   findUserStoryById,
@@ -22,6 +24,13 @@ import {
 import { mergeQueueAction } from "./merge.js";
 import { generateAgentPrompt } from "../utils/agent.js";
 import { syncMainToBranch } from "../utils/merge-helpers.js";
+import {
+  getChangedFilesInfo,
+  getGitHeadInfo,
+  getLogMtimeMs,
+  inferTaskType,
+  type TaskType,
+} from "../utils/stale-detection.js";
 
 const execAsync = promisify(exec);
 
@@ -101,6 +110,7 @@ export const updateInputSchema = z.object({
   notes: z.string().optional().describe("Implementation notes"),
   filesChanged: z.number().optional().describe("Number of files changed (for stagnation detection)"),
   error: z.string().optional().describe("Error message if stuck (for stagnation detection)"),
+  step: z.string().optional().describe("Current step label (e.g., implementing/testing/building/verifying)"),
   // US-001: Evidence-driven AC verification
   acEvidence: z.record(z.string(), acEvidenceSchema).optional()
     .describe("Per-AC evidence mapping, e.g., { 'AC-1': { passes: true, evidence: '...', command: '...', output: '...' } }"),
@@ -675,11 +685,41 @@ async function reconcileDiff(
 
 export async function update(input: UpdateInput): Promise<UpdateResult> {
   // Find execution by branch
-  const execution = await findExecutionByBranch(input.branch);
+  let execution = await findExecutionByBranch(input.branch);
+  if (!execution) {
+    execution = await restoreArchivedExecutionByBranch(input.branch);
+  }
 
   if (!execution) {
     throw new Error(`No execution found for branch: ${input.branch}`);
   }
+
+  const now = new Date();
+
+  // Resolve step label + task type for adaptive stale detection.
+  const providedStep = typeof input.step === "string" && input.step.trim().length > 0
+    ? input.step.trim()
+    : null;
+  const defaultStep = input.passes ? "verifying" : "implementing";
+  const stepLabel = providedStep ?? defaultStep;
+
+  let taskType: TaskType = inferTaskType({
+    currentStep: stepLabel,
+    extraText: input.notes || null,
+    lastError: input.error || null,
+  });
+  if (taskType === "unknown") {
+    taskType = input.passes ? "verifying" : "implementing";
+  }
+
+  // Update current activity tracking
+  const stepChanged = execution.currentStep !== stepLabel;
+  await updateExecution(execution.id, {
+    currentStoryId: input.storyId,
+    currentStep: stepLabel,
+    stepStartedAt: stepChanged ? now : execution.stepStartedAt,
+    updatedAt: now,
+  });
 
   // Find and update the story
   const storyKey = `${execution.id}:${input.storyId}`;
@@ -694,7 +734,36 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
   // Record loop result for stagnation detection
   const filesChanged = input.filesChanged ?? 0;
   const error = input.error ?? null;
-  const stagnationResult = await recordLoopResult(execution.id, filesChanged, error);
+
+  // Phase 2: Multi-signal progress detection + adaptive no-progress timeout.
+  const config = getConfig(execution.projectRoot);
+  const stagnationThresholds = config.agent.stagnation;
+  const stale = config.agent.staleDetection;
+
+  const timeoutMsByType: Record<TaskType, number> = {
+    implementing: stale.timeoutsMs.implementing,
+    building: stale.timeoutsMs.building,
+    testing: stale.timeoutsMs.testing,
+    verifying: stale.timeoutsMs.verifying,
+    unknown: stale.timeoutsMs.unknown,
+  };
+
+  const workDir = execution.worktreePath || execution.projectRoot;
+  const progressSignals = {
+    gitHeadCommitMs: stale.signals.gitCommits ? (await getGitHeadInfo(workDir)).commitMs : null,
+    changedFilesMaxMtimeMs: stale.signals.fileChanges ? (await getChangedFilesInfo(workDir, stale.maxFilesToStat)).maxMtimeMs : null,
+    logMtimeMs: stale.signals.logMtime && execution.logPath ? await getLogMtimeMs(execution.logPath) : null,
+  };
+
+  const stagnationResult = await recordLoopResult(execution.id, filesChanged, error, {
+    now,
+    thresholds: {
+      noProgressThreshold: stagnationThresholds.noProgressThreshold,
+      sameErrorThreshold: stagnationThresholds.sameErrorThreshold,
+    },
+    noProgressTimeoutMs: stale.enabled ? timeoutMsByType[taskType] : undefined,
+    progressSignals,
+  });
 
   // If stagnant, mark execution as failed and return early
   if (stagnationResult.isStagnant) {
@@ -797,7 +866,27 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
 
   // Update execution status
   const newStatus = allComplete ? "completed" : "running";
-  await updateExecution(execution.id, { status: newStatus, updatedAt: new Date() });
+
+  // Clear current step tracking if all complete, otherwise keep tracking
+  if (allComplete) {
+    await updateExecution(execution.id, {
+      status: newStatus,
+      currentStoryId: null,
+      currentStep: null,
+      stepStartedAt: null,
+      updatedAt: new Date()
+    });
+  } else {
+    // Find next pending story
+    const nextStory = updatedStories.find((s) => !s.passes);
+    await updateExecution(execution.id, {
+      status: newStatus,
+      currentStoryId: nextStory?.storyId || null,
+      currentStep: nextStory ? "pending" : null,
+      stepStartedAt: nextStory ? new Date() : null,
+      updatedAt: new Date()
+    });
+  }
 
   // Auto add to merge queue if enabled and all complete
   let addedToMergeQueue = false;

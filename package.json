@@ -9,10 +9,12 @@
     "ralph-runner": "dist/runner-cli.js"
   },
   "scripts": {
+    "test": "pnpm build && node --test --test-concurrency=1",
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "runner": "node dist/runner-cli.js",
+    "runner:dev": "tsx src/runner-cli.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -49,12 +51,14 @@
     "@modelcontextprotocol/sdk": "^1.25.3",
     "gray-matter": "^4.0.3",
     "node-notifier": "^10.0.1",
+    "proper-lockfile": "^4.1.2",
     "yaml": "^2.8.2",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.19.7",
     "@types/node-notifier": "^8.0.5",
+    "@types/proper-lockfile": "^4.1.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

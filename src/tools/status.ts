@@ -1,7 +1,9 @@
 import { exec } from "child_process";
 import { existsSync } from "fs";
+import { freemem, totalmem } from "os";
 import { promisify } from "util";
 import { z } from "zod";
+import { getConfig } from "../config/loader.js";
 import {
   listExecutions,
   listArchivedExecutions,
@@ -10,20 +12,46 @@ import {
   deleteMergeQueueByExecutionId,
   updateExecution,
   archiveExecution,
+  getRunnerConfig,
   ExecutionRecord,
+  type ExecutionPriority,
   ReconcileReason,
 } from "../store/state.js";
 import { removeWorktree } from "../utils/worktree.js";
+import {
+  evaluateExecutionStaleness,
+  type StaleDetectionConfig,
+  type StaleDecision,
+} from "../utils/stale-detection.js";
 
 const execAsync = promisify(exec);
 
-// Timeout threshold for detecting interrupted executions (30 minutes)
-const INTERRUPT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEBUG_RECONCILE =
+  process.env.RALPH_DEBUG_RECONCILE === "1" ||
+  process.env.RALPH_DEBUG_RECONCILE === "true";
+
+function logReconcile(
+  exec: ExecutionRecord,
+  message: string,
+  details?: Record<string, unknown>
+): void {
+  if (!DEBUG_RECONCILE) return;
+  const prefix = `[ralph:reconcile] ${exec.branch} (${exec.id})`;
+  if (!details) {
+    console.log(prefix, message);
+    return;
+  }
+  try {
+    console.log(prefix, message, JSON.stringify(details));
+  } catch {
+    console.log(prefix, message, String(details));
+  }
+}
 
 export const statusInputSchema = z.object({
   project: z.string().optional().describe("Filter by project name"),
   status: z
-    .enum(["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging", "merged"])
+    .enum(["pending", "ready", "starting", "running", "interrupted", "completed", "failed", "stopped", "merging", "merged"])
     .optional()
     .describe("Filter by status"),
   reconcile: z
@@ -43,6 +71,7 @@ export type StatusInput = z.infer<typeof statusInputSchema>;
 export interface ExecutionStatus {
   branch: string;
   description: string;
+  priority: ExecutionPriority;
   status: string;
   progress: string;
   completedStories: number;
@@ -63,10 +92,17 @@ export interface ExecutionStatus {
   worktreeDirty: string | null; // Summary of uncommitted changes
 }
 
+export interface ReadyQueueItem {
+  branch: string;
+  description: string;
+  priority: ExecutionPriority;
+  createdAt: string;
+}
+
 export interface ReconcileAction {
   branch: string;
   previousStatus: string;
-  action: "deleted" | "skipped" | "marked_interrupted" | "archived";
+  action: "deleted" | "skipped" | "marked_interrupted" | "marked_completed" | "archived";
   reason: string;
 }
 
@@ -98,6 +134,7 @@ export interface ExecutionStats {
 
 export interface StatusResult {
   executions: ExecutionStatus[];
+  readyQueue?: ReadyQueueItem[];
   summary: {
     total: number;
     running: number;
@@ -106,6 +143,13 @@ export interface StatusResult {
     pending: number;
     interrupted: number; // Executions that were interrupted (session closed)
     atRisk: number; // Executions approaching stagnation threshold
+  };
+  system?: {
+    freeMemoryPercent: number;
+    freeMemoryGB: number;
+    effectiveConcurrency: number;
+    maxConcurrency: number;
+    pausedDueToMemory: boolean;
   };
   overallState: OverallState;
   history: ArchivedExecutionSummary[];
@@ -137,7 +181,7 @@ async function isBranchMergedToMain(
 
     const mergedBranches = stdout
       .split("\n")
-      .map((b) => b.trim().replace(/^\* /, ""));
+      .map((b) => b.trim().replace(/^[*+]\s+/, ""));
 
     return mergedBranches.includes(branch);
   } catch {
@@ -184,28 +228,97 @@ async function getWorktreeDirtyStatus(
 
 /**
  * Check if an execution is interrupted (running but no activity for too long).
+ * Phase 2: Adaptive timeout + multi-signal detection (git commits + file mtimes + log mtime).
  */
-function isExecutionInterrupted(exec: ExecutionRecord): {
+const staleConfigCache = new Map<string, StaleDetectionConfig>();
+
+function getStaleDetectionConfig(projectRoot: string): StaleDetectionConfig {
+  const cached = staleConfigCache.get(projectRoot);
+  if (cached) return cached;
+
+  const config = getConfig(projectRoot);
+  const stale = config.agent.staleDetection;
+
+  const resolved: StaleDetectionConfig = {
+    enabled: stale.enabled,
+    timeoutsMs: stale.timeoutsMs,
+    signals: stale.signals,
+    maxFilesToStat: stale.maxFilesToStat,
+    logTailBytes: stale.logTailBytes,
+  };
+
+  staleConfigCache.set(projectRoot, resolved);
+  return resolved;
+}
+
+function formatAgeShort(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainMin = minutes % 60;
+  return remainMin > 0 ? `${hours}h${remainMin}m` : `${hours}h`;
+}
+
+function formatSignalAges(decision: StaleDecision, nowMs: number): string {
+  const parts: string[] = [];
+  const s = decision.signals;
+
+  if (typeof s.stateUpdatedAtMs === "number") {
+    parts.push(`state:${formatAgeShort(nowMs - s.stateUpdatedAtMs)}`);
+  }
+  if (typeof s.gitHeadCommitMs === "number") {
+    parts.push(`git:${formatAgeShort(nowMs - s.gitHeadCommitMs)}`);
+  }
+  if (typeof s.changedFilesMaxMtimeMs === "number") {
+    parts.push(`files:${formatAgeShort(nowMs - s.changedFilesMaxMtimeMs)}`);
+  }
+  if (typeof s.logMtimeMs === "number") {
+    parts.push(`log:${formatAgeShort(nowMs - s.logMtimeMs)}`);
+  }
+
+  return parts.length > 0 ? parts.join(", ") : "no signals";
+}
+
+async function isExecutionInterrupted(exec: ExecutionRecord): Promise<{
   interrupted: boolean;
   reason: string | null;
-} {
+  decision?: StaleDecision;
+}> {
   if (exec.status !== "running") {
     return { interrupted: false, reason: null };
   }
 
-  const lastActivity = exec.updatedAt.getTime();
-  const now = Date.now();
-  const elapsed = now - lastActivity;
+  const nowMs = Date.now();
+  const config = getStaleDetectionConfig(exec.projectRoot);
 
-  if (elapsed > INTERRUPT_TIMEOUT_MS) {
-    const minutes = Math.round(elapsed / 60000);
-    return {
-      interrupted: true,
-      reason: `No activity for ${minutes} minutes (likely session closed)`,
-    };
+  const decision = await evaluateExecutionStaleness(
+    {
+      updatedAt: exec.updatedAt,
+      currentStep: exec.currentStep,
+      lastError: exec.lastError,
+      projectRoot: exec.projectRoot,
+      worktreePath: exec.worktreePath,
+      logPath: exec.logPath,
+    },
+    config,
+    nowMs
+  );
+
+  if (!decision.isStale) {
+    return { interrupted: false, reason: null, decision };
   }
 
-  return { interrupted: false, reason: null };
+  const idle = formatAgeShort(decision.idleMs);
+  const timeout = formatAgeShort(decision.timeoutMs);
+  const signals = formatSignalAges(decision, nowMs);
+
+  return {
+    interrupted: true,
+    reason: `No activity for ${idle} (timeout: ${timeout}, task: ${decision.taskType}, signals: ${signals})`,
+    decision,
+  };
 }
 
 /**
@@ -216,10 +329,25 @@ async function doesBranchExist(
   projectRoot: string
 ): Promise<boolean> {
   try {
-    await execAsync(`git rev-parse --verify ${branch}`, { cwd: projectRoot });
+    await execAsync(`git rev-parse --verify "${branch}"`, { cwd: projectRoot });
     return true;
   } catch {
     return false;
+  }
+}
+
+async function getBranchHeadSha(
+  branch: string,
+  projectRoot: string
+): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(`git rev-parse --verify "${branch}"`, {
+      cwd: projectRoot,
+    });
+    const sha = stdout.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
   }
 }
 
@@ -245,12 +373,43 @@ async function reconcileExecutions(
     const isMerged = await isBranchMergedToMain(exec.branch, exec.projectRoot);
 
     if (isMerged) {
+      // IMPORTANT: A freshly-created branch from main (no divergence) is also "merged" per git.
+      // Avoid "ghost merges" by only reconciling when the branch has advanced since execution start.
+      const branchHeadSha = await getBranchHeadSha(exec.branch, exec.projectRoot);
+      const baseCommitSha = exec.baseCommitSha;
+
+      // If we can't resolve the current branch head, don't make destructive decisions.
+      if (!branchHeadSha) {
+        logReconcile(exec, "skip: unable to resolve branch head sha", {});
+        continue;
+      }
+
+      if (!baseCommitSha) {
+        // Should not happen for new executions (baseCommitSha is written at creation time).
+        // For legacy/corrupted records, be conservative and avoid destructive reconcile.
+        logReconcile(exec, "skip: missing baseCommitSha (cannot validate divergence)", { branchHeadSha });
+        continue;
+      }
+
+      if (baseCommitSha === branchHeadSha) {
+        // Leave status untouched: this execution hasn't produced any commits since it was created.
+        logReconcile(exec, "skip: ghost-merge guard (no divergence yet)", {
+          baseCommitSha,
+          branchHeadSha,
+        });
+        continue;
+      }
+
       // Branch is merged but status doesn't reflect it - archive it
       try {
+        logReconcile(exec, "archiving: branch merged and diverged since start", {
+          baseCommitSha,
+          branchHeadSha,
+        });
         // Try to remove worktree if exists
         if (exec.worktreePath) {
           try {
-            await removeWorktree(exec.worktreePath, exec.projectRoot);
+            await removeWorktree(exec.projectRoot, exec.worktreePath);
           } catch {
             // Worktree might already be gone
           }
@@ -260,7 +419,6 @@ async function reconcileExecutions(
         await updateExecution(exec.id, {
           status: "merged",
           reconcileReason: "branch_merged" as ReconcileReason,
-          mergedAt: new Date(),
           updatedAt: new Date(),
         }, { skipTransitionValidation: true });
 
@@ -291,7 +449,7 @@ async function reconcileExecutions(
         // Try to remove worktree if exists
         if (exec.worktreePath) {
           try {
-            await removeWorktree(exec.worktreePath, exec.projectRoot);
+            await removeWorktree(exec.projectRoot, exec.worktreePath);
           } catch {
             // Worktree might already be gone
           }
@@ -358,22 +516,42 @@ async function reconcileExecutions(
     }
 
     // Check if running execution is interrupted (zombie)
-    const { interrupted, reason } = isExecutionInterrupted(exec);
+    const { interrupted, reason } = await isExecutionInterrupted(exec);
     if (interrupted && reason) {
       try {
-        // Mark as failed so it can be retried
-        await updateExecution(exec.id, {
-          status: "failed",
-          lastError: reason,
-          updatedAt: new Date(),
-        });
+        // Check if all stories are complete before marking as failed
+        const stories = await listUserStoriesByExecutionId(exec.id);
+        const allComplete = stories.length > 0 && stories.every((s) => s.passes);
 
-        actions.push({
-          branch: exec.branch,
-          previousStatus: exec.status,
-          action: "marked_interrupted",
-          reason,
-        });
+        if (allComplete) {
+          // All stories done - mark as completed, not failed
+          await updateExecution(exec.id, {
+            status: "completed",
+            lastError: null,
+            updatedAt: new Date(),
+          });
+
+          actions.push({
+            branch: exec.branch,
+            previousStatus: exec.status,
+            action: "marked_completed",
+            reason: "All stories complete, session ended normally",
+          });
+        } else {
+          // Mark as interrupted so Runner can auto-retry
+          await updateExecution(exec.id, {
+            status: "interrupted",
+            lastError: reason,
+            updatedAt: new Date(),
+          });
+
+          actions.push({
+            branch: exec.branch,
+            previousStatus: exec.status,
+            action: "marked_interrupted",
+            reason,
+          });
+        }
       } catch (error) {
         actions.push({
           branch: exec.branch,
@@ -431,7 +609,7 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     const acProgress = totalAc > 0 ? `${passingAc}/${totalAc} AC` : "No AC";
 
     // Check interrupt status
-    const { interrupted, reason: interruptReason } = isExecutionInterrupted(exec);
+    const { interrupted, reason: interruptReason } = await isExecutionInterrupted(exec);
 
     // Get worktree dirty status
     const worktreeDirty = exec.worktreePath
@@ -441,6 +619,7 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     executionStatuses.push({
       branch: exec.branch,
       description: exec.description,
+      priority: exec.priority,
       status: exec.status,
       progress: `${completedStories}/${totalStories} US`,
       completedStories,
@@ -526,13 +705,66 @@ export async function status(input: StatusInput): Promise<StatusResult> {
     totalFailed: archivedExecutions.filter((e) => e.status === "failed" || e.status === "stopped").length,
   };
 
+  // Dynamic memory-based concurrency calculation
+  const runnerConfig = await getRunnerConfig();
+  const freeMemBytes = freemem();
+  const totalMemBytes = totalmem();
+  const freeMemoryPercent = (freeMemBytes / totalMemBytes) * 100;
+  const freeMemGB = freeMemBytes / (1024 * 1024 * 1024);
+
+  // Reserve 2GB for system + other apps, each agent needs ~800MB
+  const RESERVED_GB = 2;
+  const MEM_PER_AGENT_GB = 0.8;
+  const availableForAgents = Math.max(0, freeMemGB - RESERVED_GB);
+  const calculatedConcurrency = Math.floor(availableForAgents / MEM_PER_AGENT_GB);
+  const effectiveConcurrency = Math.min(calculatedConcurrency, runnerConfig.maxConcurrency);
+  const pausedDueToMemory = effectiveConcurrency === 0;
+
   const result: StatusResult = {
     executions: executionStatuses,
     summary,
+    system: {
+      freeMemoryPercent: Number(freeMemoryPercent.toFixed(1)),
+      freeMemoryGB: Number(freeMemGB.toFixed(1)),
+      effectiveConcurrency,
+      maxConcurrency: runnerConfig.maxConcurrency,
+      pausedDueToMemory,
+    },
     overallState,
     history,
     stats,
   };
+
+  // Optional: include a ready-queue view sorted by priority and age
+  if (!input.status || input.status === "ready") {
+    let readyQueueSource = allExecutions.filter((e) => e.status === "ready");
+    if (input.project) {
+      readyQueueSource = readyQueueSource.filter((e) => e.project === input.project);
+    }
+
+    const priorityWeight: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
+    const readyQueue: ReadyQueueItem[] = readyQueueSource
+      .slice()
+      .sort((a, b) => {
+        const aWeight = priorityWeight[a.priority] ?? priorityWeight.P1;
+        const bWeight = priorityWeight[b.priority] ?? priorityWeight.P1;
+        return (
+          aWeight - bWeight ||
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          a.branch.localeCompare(b.branch)
+        );
+      })
+      .map((e) => ({
+        branch: e.branch,
+        description: e.description,
+        priority: e.priority,
+        createdAt: e.createdAt.toISOString(),
+      }));
+
+    if (readyQueue.length > 0) {
+      result.readyQueue = readyQueue;
+    }
+  }
 
   // Only include reconciled if there were actions
   if (reconciled && reconciled.length > 0) {
