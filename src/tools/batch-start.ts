@@ -12,7 +12,6 @@ import {
 import {
   areDependenciesSatisfied,
   updateExecution,
-  ExecutionRecord,
 } from "../store/state.js";
 
 export const batchStartInputSchema = z.object({
@@ -56,7 +55,7 @@ export interface BatchStartResult {
   skipped: Array<{ prdPath: string; reason: string }>;
   readyToStart: Array<{
     branch: string;
-    agentPrompt: string;
+    agentPrompt: string | null;
     dependencies: string[];
   }>;
   waitingForDependencies: Array<{
@@ -135,6 +134,10 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
     ? resolve(projectRoot, input.contextInjectionPath)
     : undefined;
 
+  // If the Runner is enabled (default), we intentionally do NOT return agent prompts.
+  // This prevents manual starts that bypass the Runner's concurrency control.
+  const manualStartMode = process.env.RALPH_AUTO_RUNNER === "false";
+
   // Detect package manager
   const pm = detectPackageManager(projectRoot);
   const installCmd = getInstallCommand(pm);
@@ -198,7 +201,7 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
   // Phase 4: Determine which PRDs can start immediately
   const readyToStart: Array<{
     branch: string;
-    agentPrompt: string;
+    agentPrompt: string | null;
     dependencies: string[];
   }> = [];
 
@@ -208,29 +211,42 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
   }> = [];
 
   for (const prd of prdInfos) {
-    const tempExec = { dependencies: prd.dependencies } as ExecutionRecord;
-    const depStatus = await areDependenciesSatisfied(tempExec);
+    const depStatus = await areDependenciesSatisfied({
+      dependencies: prd.dependencies,
+      projectRoot,
+      prdPath: resolve(projectRoot, prd.prdPath),
+    });
 
     if (depStatus.satisfied) {
-      const agentPrompt = generateAgentPrompt(
-        prd.branch,
-        "", // description not stored in prdInfo
-        prd.worktreePath || projectRoot,
-        prd.stories,
-        contextPath
-      );
-
-      // Mark as running immediately since we're returning the prompt
-      await updateExecution(prd.executionId, {
-        status: "running",
-        updatedAt: new Date(),
-      });
-
       readyToStart.push({
         branch: prd.branch,
-        agentPrompt,
+        agentPrompt: null,
         dependencies: prd.dependencies,
       });
+
+      if (manualStartMode) {
+        const agentPrompt = generateAgentPrompt(
+          prd.branch,
+          "", // description not stored in prdInfo
+          prd.worktreePath || projectRoot,
+          prd.stories,
+          contextPath
+        );
+
+        // Mark as running immediately since we're returning the prompt (legacy behavior)
+        await updateExecution(prd.executionId, {
+          status: "running",
+          updatedAt: new Date(),
+        });
+
+        readyToStart[readyToStart.length - 1].agentPrompt = agentPrompt;
+      } else {
+        // Runner-managed mode: mark as ready and let the Runner claim and launch.
+        await updateExecution(prd.executionId, {
+          status: "ready",
+          updatedAt: new Date(),
+        });
+      }
     } else {
       waitingForDependencies.push({
         branch: prd.branch,

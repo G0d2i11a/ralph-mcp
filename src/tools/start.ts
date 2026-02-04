@@ -4,6 +4,7 @@ import { generateAgentPrompt } from "../utils/agent.js";
 import { resolve } from "path";
 import {
   areDependenciesSatisfied,
+  updateExecution,
 } from "../store/state.js";
 import { createExecutionFromPrd } from "../utils/execution.js";
 
@@ -56,12 +57,20 @@ export async function start(input: StartInput): Promise<StartResult> {
   const projectRoot = input.projectRoot || process.cwd();
   const prdPath = resolve(projectRoot, input.prdPath);
 
+  // If the Runner is enabled (default), we intentionally do NOT return an agent prompt.
+  // This prevents users from starting PRDs outside the Runner and bypassing concurrency control.
+  // Manual prompt generation remains available when the Runner is explicitly disabled.
+  const manualStartMode = process.env.RALPH_AUTO_RUNNER === "false";
+
   // Parse PRD file
   const prd = parsePrdFile(prdPath);
 
   // Check dependencies BEFORE creating worktree
-  const tempExec = { dependencies: prd.dependencies } as { dependencies: string[] };
-  const depStatus = await areDependenciesSatisfied(tempExec as any);
+  const depStatus = await areDependenciesSatisfied({
+    dependencies: prd.dependencies,
+    projectRoot,
+    prdPath,
+  });
 
   const canStartNow = depStatus.satisfied || input.ignoreDependencies;
 
@@ -81,13 +90,20 @@ export async function start(input: StartInput): Promise<StartResult> {
     onConflict: input.onConflict,
     autoMerge: input.autoMerge,
     notifyOnComplete: input.notifyOnComplete,
-    status: "pending",
+    status: canStartNow ? "ready" : "pending",
   });
 
   // Generate agent prompt if auto-start is enabled and dependencies are satisfied
   // (or ignoreDependencies=true).
   let agentPrompt: string | null = null;
-  if (input.autoStart && canStartNow) {
+  if (manualStartMode && input.autoStart && canStartNow) {
+    await updateExecution(created.executionId, {
+      status: "starting",
+      launchAttemptAt: new Date(),
+      launchAttempts: 1,
+      updatedAt: new Date(),
+    });
+
     const contextPath = input.contextInjectionPath
       ? resolve(projectRoot, input.contextInjectionPath)
       : undefined;

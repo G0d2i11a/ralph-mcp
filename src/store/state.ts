@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync, type Dirent } from "fs";
 import { readFile, readdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, isAbsolute, join } from "path";
 import * as lockfile from "proper-lockfile";
+import matter from "gray-matter";
+import { generateBranchName } from "../utils/prd-parser.js";
 
 export const RALPH_DATA_DIR =
   process.env.RALPH_DATA_DIR?.replace("~", homedir()) ||
@@ -62,6 +64,25 @@ export function isValidTransition(from: ExecutionStatus, to: ExecutionStatus): b
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
+/**
+ * PRD-level priority for scheduling.
+ * - P0: highest priority
+ * - P1: default
+ * - P2: lowest priority
+ */
+export type ExecutionPriority = "P0" | "P1" | "P2";
+
+export const DEFAULT_EXECUTION_PRIORITY: ExecutionPriority = "P1";
+
+export function normalizeExecutionPriority(value: unknown): ExecutionPriority {
+  if (typeof value !== "string") return DEFAULT_EXECUTION_PRIORITY;
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "P0" || normalized === "P1" || normalized === "P2") {
+    return normalized;
+  }
+  return DEFAULT_EXECUTION_PRIORITY;
+}
+
 export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 
 /**
@@ -88,9 +109,15 @@ export interface ExecutionRecord {
   project: string;
   branch: string;
   description: string;
+  priority: ExecutionPriority;
   prdPath: string;
   projectRoot: string;
   worktreePath: string | null;
+  /**
+   * Branch HEAD commit SHA at the time the execution was created.
+   * Used to distinguish "already merged because it never diverged" from a real merge.
+   */
+  baseCommitSha: string | null;
   status: ExecutionStatus;
   agentTaskId: string | null;
   onConflict: ConflictStrategy | null;
@@ -103,6 +130,7 @@ export interface ExecutionRecord {
   consecutiveErrors: number; // Loops with repeated errors
   lastError: string | null; // Last error for comparison
   lastFilesChanged: number; // Files changed in last update
+  lastProgressAt: Date | null; // Last observed progress timestamp (git/log/files)
   // Current activity tracking
   currentStoryId: string | null; // Story currently being worked on
   currentStep: string | null; // Current step description (e.g., "implementing", "testing")
@@ -165,11 +193,11 @@ interface RunnerConfigFileV1 {
 
 interface StateFileV1 {
   version: 1;
-  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null }>;
+  executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt" | "lastProgressAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null; lastProgressAt: string | null }>;
   userStories: UserStoryRecord[];
   mergeQueue: Array<Omit<MergeQueueItem, "createdAt"> & { createdAt: string }>;
   // Archived data for history
-  archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null }>;
+  archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt" | "lastProgressAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null; lastProgressAt: string | null }>;
   archivedUserStories?: UserStoryRecord[];
   runnerConfig?: RunnerConfigFileV1;
 }
@@ -261,13 +289,17 @@ function deserializeState(file: StateFileV1): StateRuntime {
 
   const deserializeExecution = (e: StateFileV1["executions"][0]) => ({
     ...e,
+    // PRD priority default for backward compatibility
+    priority: normalizeExecutionPriority((e as any).priority),
     dependencies: Array.isArray(e.dependencies) ? e.dependencies : [],
+    baseCommitSha: typeof (e as any).baseCommitSha === "string" ? (e as any).baseCommitSha : null,
     // Stagnation detection defaults for backward compatibility
     loopCount: typeof (e as any).loopCount === "number" ? (e as any).loopCount : 0,
     consecutiveNoProgress: typeof (e as any).consecutiveNoProgress === "number" ? (e as any).consecutiveNoProgress : 0,
     consecutiveErrors: typeof (e as any).consecutiveErrors === "number" ? (e as any).consecutiveErrors : 0,
     lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
     lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
+    lastProgressAt: typeof (e as any).lastProgressAt === "string" ? parseDate((e as any).lastProgressAt, "executions.lastProgressAt") : null,
     // Current activity tracking defaults for backward compatibility
     currentStoryId: typeof (e as any).currentStoryId === "string" ? (e as any).currentStoryId : null,
     currentStep: typeof (e as any).currentStep === "string" ? (e as any).currentStep : null,
@@ -313,6 +345,7 @@ function serializeState(state: StateRuntime): StateFileV1 {
   const serializeExecution = (e: ExecutionRecord) => ({
     ...e,
     stepStartedAt: e.stepStartedAt ? toIso(e.stepStartedAt) : null,
+    lastProgressAt: e.lastProgressAt ? toIso(e.lastProgressAt) : null,
     launchAttemptAt: e.launchAttemptAt ? toIso(e.launchAttemptAt) : null,
     mergedAt: e.mergedAt ? toIso(e.mergedAt) : null,
     createdAt: toIso(e.createdAt),
@@ -545,6 +578,31 @@ export async function insertExecution(execution: ExecutionRecord): Promise<void>
   });
 }
 
+/**
+ * Atomically insert an execution and its user stories in a single state write.
+ * Prevents partially-initialized executions (e.g. missing required fields) from
+ * being observed by other readers between writes.
+ */
+export async function insertExecutionAtomic(
+  execution: ExecutionRecord,
+  stories: UserStoryRecord[]
+): Promise<void> {
+  return mutateState((s) => {
+    const existing = s.executions.find((e) => e.branch === execution.branch);
+    if (existing) {
+      throw new Error(`Execution already exists for branch ${execution.branch}`);
+    }
+
+    s.executions.push(execution);
+
+    for (const story of stories) {
+      const existingIndex = s.userStories.findIndex((st) => st.id === story.id);
+      if (existingIndex >= 0) s.userStories.splice(existingIndex, 1);
+      s.userStories.push(story);
+    }
+  });
+}
+
 export async function updateExecution(
   executionId: string,
   patch: Partial<Omit<ExecutionRecord, "id" | "createdAt">> & { updatedAt?: Date },
@@ -656,36 +714,220 @@ export async function findExecutionsDependingOn(branch: string): Promise<Executi
  * Check if all dependencies of an execution are completed.
  * Checks both active executions (status: "completed") and archived executions (status: "merged").
  */
-export async function areDependenciesSatisfied(execution: ExecutionRecord): Promise<{
+export async function areDependenciesSatisfied(execution: Pick<ExecutionRecord, "dependencies" | "projectRoot" | "prdPath">): Promise<{
   satisfied: boolean;
   pending: string[];
   completed: string[];
 }> {
+  type DependencyPrdMetadata = {
+    frontmatter: Record<string, unknown>;
+    title: string | null;
+  };
+
+  const normalizeDependencySlug = (dep: string): string | null => {
+    const slug = dep
+      .trim()
+      .replace(/\.md$/i, "")
+      .replace(/\.json$/i, "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean)
+      .pop();
+
+    return slug ? slug : null;
+  };
+
+  const inferBranchPrefix = (ref: string): string => {
+    const normalized = ref.trim().replace(/\\/g, "/");
+    const idx = normalized.lastIndexOf("/");
+    if (idx === -1) return "ralph/";
+    return normalized.slice(0, idx + 1);
+  };
+
+  const normalizeBranchRef = (ref: string, branchPrefix: string): string => {
+    const normalized = ref.trim().replace(/\.md$/i, "").replace(/\.json$/i, "").replace(/\\/g, "/");
+    if (!normalized) return "";
+    if (normalized.includes("/")) return normalized;
+    return `${branchPrefix}${normalized}`;
+  };
+
+  const loadPrdMetadata = async (filePath: string): Promise<DependencyPrdMetadata | null> => {
+    try {
+      const raw = await readFile(filePath, "utf-8");
+
+      if (filePath.toLowerCase().endsWith(".json")) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object") return null;
+        const frontmatter = parsed as Record<string, unknown>;
+        const title = typeof frontmatter.title === "string" ? frontmatter.title : null;
+        return { frontmatter, title };
+      }
+
+      const parsed = matter(raw);
+      const frontmatter = parsed.data as Record<string, unknown>;
+      const titleMatch = parsed.content.match(/^#\s+(.+)$/m);
+      const title =
+        (typeof frontmatter.title === "string" ? frontmatter.title : null) ||
+        titleMatch?.[1] ||
+        null;
+
+      return { frontmatter, title };
+    } catch {
+      return null;
+    }
+  };
+
+  const resolveDependencyPrdMetadata = async (
+    depSlug: string,
+    baseDirs: string[]
+  ): Promise<DependencyPrdMetadata | null> => {
+    // Fast path: dependency slug matches filename.
+    for (const dir of baseDirs) {
+      const mdPath = join(dir, `${depSlug}.md`);
+      if (existsSync(mdPath)) return loadPrdMetadata(mdPath);
+
+      const jsonPath = join(dir, `${depSlug}.json`);
+      if (existsSync(jsonPath)) return loadPrdMetadata(jsonPath);
+    }
+
+    // Fallback: scan PRD files for matching `id`/`aliases`/`branch` values.
+    const target = depSlug.toLowerCase();
+
+    const matchesTarget = (value: unknown): boolean => {
+      if (typeof value !== "string") return false;
+      const normalized = normalizeDependencySlug(value);
+      return normalized ? normalized.toLowerCase() === target : false;
+    };
+
+    for (const dir of baseDirs) {
+      let entries: Dirent[];
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const lower = entry.name.toLowerCase();
+        if (!lower.endsWith(".md") && !lower.endsWith(".json")) continue;
+        if (!lower.startsWith("prd-")) continue;
+
+        const meta = await loadPrdMetadata(join(dir, entry.name));
+        if (!meta) continue;
+
+        const frontmatter = meta.frontmatter as {
+          id?: unknown;
+          slug?: unknown;
+          aliases?: unknown;
+          branch?: unknown;
+          branchName?: unknown;
+        };
+
+        if (matchesTarget(frontmatter.id)) return meta;
+        if (matchesTarget(frontmatter.slug)) return meta;
+        if (matchesTarget(frontmatter.branch)) return meta;
+        if (matchesTarget(frontmatter.branchName)) return meta;
+
+        if (Array.isArray(frontmatter.aliases) && frontmatter.aliases.some(matchesTarget)) {
+          return meta;
+        }
+      }
+    }
+
+    return null;
+  };
+
   if (!execution.dependencies || execution.dependencies.length === 0) {
     return { satisfied: true, pending: [], completed: [] };
   }
 
+  const completed: string[] = [];
+  const pending: string[] = [];
+
+  const baseDirs: string[] = [];
+  if (execution.prdPath) {
+    const prdPath =
+      execution.projectRoot && !isAbsolute(execution.prdPath)
+        ? join(execution.projectRoot, execution.prdPath)
+        : execution.prdPath;
+    baseDirs.push(dirname(prdPath));
+  }
+  if (execution.projectRoot) {
+    baseDirs.push(join(execution.projectRoot, "tasks"));
+  }
+
+  const remaining: Array<{ dep: string; stateBranches: string[] }> = [];
+
+  for (const depBranch of execution.dependencies) {
+    const prdSlug = normalizeDependencySlug(depBranch);
+    const branchPrefix = inferBranchPrefix(depBranch);
+
+    const depMeta = prdSlug ? await resolveDependencyPrdMetadata(prdSlug, baseDirs) : null;
+    const depFrontmatter = depMeta?.frontmatter ?? null;
+
+    const statusValue = typeof depFrontmatter?.status === "string" ? depFrontmatter.status.trim().toLowerCase() : null;
+    if (statusValue === "completed" || statusValue === "merged") {
+      completed.push(depBranch);
+      continue;
+    }
+
+    const branchFromFrontmatter =
+      typeof depFrontmatter?.branch === "string" ? depFrontmatter.branch.trim() : "";
+    const branchNameFromFrontmatter =
+      typeof (depFrontmatter as { branchName?: unknown } | null)?.branchName === "string"
+        ? (depFrontmatter as { branchName: string }).branchName.trim()
+        : "";
+
+    const stateBranches = new Set<string>();
+
+    const normalizedBranchFromFrontmatter = branchFromFrontmatter
+      ? normalizeBranchRef(branchFromFrontmatter, branchPrefix)
+      : "";
+    const normalizedBranchNameFromFrontmatter = branchNameFromFrontmatter
+      ? normalizeBranchRef(branchNameFromFrontmatter, branchPrefix)
+      : "";
+
+    if (normalizedBranchFromFrontmatter) stateBranches.add(normalizedBranchFromFrontmatter);
+    if (normalizedBranchNameFromFrontmatter) stateBranches.add(normalizedBranchNameFromFrontmatter);
+
+    // Always consider the literal dependency branch for backward-compatibility.
+    stateBranches.add(depBranch);
+
+    // If we resolved a PRD file by `id`/`aliases`, also consider the generated branch from its title.
+    if (depMeta?.title) {
+      stateBranches.add(generateBranchName(depMeta.title, branchPrefix));
+    }
+
+    remaining.push({ dep: depBranch, stateBranches: [...stateBranches].filter(Boolean) });
+  }
+
+  if (remaining.length === 0) {
+    return { satisfied: true, pending: [], completed };
+  }
+
   return readState((s) => {
-    const pending: string[] = [];
-    const completed: string[] = [];
+    const isSatisfiedStatus = (status: ExecutionStatus): boolean =>
+      status === "completed" || status === "merged";
 
-    for (const depBranch of execution.dependencies) {
-      // Check active executions first
-      const depExec = s.executions.find((e) => e.branch === depBranch);
-      if (depExec && depExec.status === "completed") {
-        completed.push(depBranch);
+    for (const { dep, stateBranches } of remaining) {
+      const satisfiedActive = s.executions.some(
+        (e) => stateBranches.includes(e.branch) && isSatisfiedStatus(e.status)
+      );
+      if (satisfiedActive) {
+        completed.push(dep);
         continue;
       }
 
-      // Check archived executions (merged PRDs are archived)
-      const archivedExec = s.archivedExecutions.find((e) => e.branch === depBranch);
-      if (archivedExec && (archivedExec.status === "merged" || archivedExec.status === "completed")) {
-        completed.push(depBranch);
+      const satisfiedArchived = s.archivedExecutions.some(
+        (e) => stateBranches.includes(e.branch) && isSatisfiedStatus(e.status)
+      );
+      if (satisfiedArchived) {
+        completed.push(dep);
         continue;
       }
 
-      // Dependency not satisfied
-      pending.push(depBranch);
+      pending.push(dep);
     }
 
     return {
@@ -721,6 +963,29 @@ export interface StagnationCheckResult {
     consecutiveErrors: number;
     lastError: string | null;
   };
+}
+
+export interface RecordLoopProgressSignals {
+  gitHeadCommitMs?: number | null;
+  changedFilesMaxMtimeMs?: number | null;
+  logMtimeMs?: number | null;
+}
+
+export interface RecordLoopOptions {
+  now?: Date;
+  thresholds?: Partial<{
+    noProgressThreshold: number;
+    sameErrorThreshold: number;
+  }>;
+  /**
+   * When provided, "no progress" only becomes stagnant once BOTH:
+   * - consecutiveNoProgress >= noProgressThreshold
+   * - (now - lastProgressAt) >= noProgressTimeoutMs
+   *
+   * If omitted, legacy behavior applies (fail purely by loop threshold).
+   */
+  noProgressTimeoutMs?: number;
+  progressSignals?: RecordLoopProgressSignals;
 }
 
 /**
@@ -792,7 +1057,8 @@ export async function checkStagnation(executionId: string): Promise<StagnationCh
 export async function recordLoopResult(
   executionId: string,
   filesChanged: number,
-  error: string | null
+  error: string | null,
+  options?: RecordLoopOptions
 ): Promise<StagnationCheckResult> {
   return mutateState(async (s) => {
     const exec = s.executions.find((e) => e.id === executionId);
@@ -800,16 +1066,44 @@ export async function recordLoopResult(
       throw new Error(`No execution found with id: ${executionId}`);
     }
 
+    const now = options?.now ?? new Date();
+    const nowMs = now.getTime();
+    const noProgressThreshold =
+      options?.thresholds?.noProgressThreshold ?? STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD;
+    const sameErrorThreshold =
+      options?.thresholds?.sameErrorThreshold ?? STAGNATION_THRESHOLDS.SAME_ERROR_THRESHOLD;
+
     // Increment loop count
     exec.loopCount++;
     exec.lastFilesChanged = filesChanged;
-    exec.updatedAt = new Date();
+    exec.updatedAt = now;
 
-    // Track no progress
-    if (filesChanged === 0) {
-      exec.consecutiveNoProgress++;
-    } else {
+    // Track progress across multiple signals (Phase 2)
+    const prevProgressMs = exec.lastProgressAt?.getTime() ?? 0;
+    const signalMs = Math.max(
+      filesChanged > 0 ? nowMs : 0,
+      options?.progressSignals?.gitHeadCommitMs ?? 0,
+      options?.progressSignals?.changedFilesMaxMtimeMs ?? 0,
+      options?.progressSignals?.logMtimeMs ?? 0
+    );
+
+    // Treat the first observation as a baseline progress point to avoid immediate timeouts.
+    const progressed = prevProgressMs === 0 || signalMs > prevProgressMs;
+
+    let nextProgressMs = prevProgressMs;
+    if (prevProgressMs === 0) {
+      nextProgressMs = signalMs > 0 ? signalMs : nowMs;
+    } else if (signalMs > prevProgressMs) {
+      nextProgressMs = signalMs;
+    }
+
+    exec.lastProgressAt = new Date(nextProgressMs);
+
+    // Track no progress (but only when none of the signals advanced)
+    if (progressed) {
       exec.consecutiveNoProgress = 0;
+    } else {
+      exec.consecutiveNoProgress++;
     }
 
     // Track repeated errors
@@ -848,17 +1142,28 @@ export async function recordLoopResult(
       };
     }
 
-    if (exec.consecutiveNoProgress >= STAGNATION_THRESHOLDS.NO_PROGRESS_THRESHOLD) {
-      exec.status = "failed";
-      return {
-        isStagnant: true,
-        type: "no_progress" as StagnationType,
-        message: `Stagnation detected: No file changes for ${exec.consecutiveNoProgress} consecutive loops`,
-        metrics,
-      };
+    if (exec.consecutiveNoProgress >= noProgressThreshold) {
+      const timeoutMs = options?.noProgressTimeoutMs;
+      const idleMs = nowMs - (exec.lastProgressAt?.getTime() ?? nowMs);
+
+      // Legacy behavior if no timeout configured: open circuit purely by loop threshold.
+      const timedOut = typeof timeoutMs === "number" ? idleMs >= timeoutMs : true;
+
+      if (timedOut) {
+        exec.status = "failed";
+        return {
+          isStagnant: true,
+          type: "no_progress" as StagnationType,
+          message:
+            typeof timeoutMs === "number"
+              ? `Stagnation detected: No progress for ${exec.consecutiveNoProgress} loops (idle ${(idleMs / 60000).toFixed(1)}m, timeout ${(timeoutMs / 60000).toFixed(1)}m)`
+              : `Stagnation detected: No file/progress signals for ${exec.consecutiveNoProgress} consecutive loops`,
+          metrics,
+        };
+      }
     }
 
-    if (exec.consecutiveErrors >= STAGNATION_THRESHOLDS.SAME_ERROR_THRESHOLD) {
+    if (exec.consecutiveErrors >= sameErrorThreshold) {
       exec.status = "failed";
       return {
         isStagnant: true,
@@ -887,6 +1192,7 @@ export async function resetStagnation(executionId: string): Promise<void> {
     exec.consecutiveNoProgress = 0;
     exec.consecutiveErrors = 0;
     exec.lastError = null;
+    exec.lastProgressAt = new Date();
     exec.updatedAt = new Date();
   });
 }
@@ -968,4 +1274,44 @@ export async function findArchivedExecutionById(executionId: string): Promise<Ex
  */
 export async function findArchivedExecutionByBranch(branch: string): Promise<ExecutionRecord | null> {
   return readState((s) => s.archivedExecutions.find((e) => e.branch === branch) ?? null);
+}
+
+/**
+ * Restore a failed/stopped execution from the archive back into the active list.
+ *
+ * This is a safety valve for cases where a long-running agent session continues after the Runner (or reconcile)
+ * archived a terminal execution record. The agent can then call `ralph_update` and recover tracking.
+ */
+export async function restoreArchivedExecutionByBranch(branch: string): Promise<ExecutionRecord | null> {
+  return mutateState((s) => {
+    const existing = s.executions.find((e) => e.branch === branch);
+    if (existing) return existing;
+
+    const candidates = s.archivedExecutions
+      .map((e, idx) => ({ exec: e, idx }))
+      .filter(({ exec }) => exec.branch === branch)
+      .filter(({ exec }) => exec.status === "failed" || exec.status === "stopped");
+
+    if (candidates.length === 0) return null;
+
+    // Prefer failed over stopped, then most recent activity.
+    const statusRank = (status: ExecutionStatus): number => (status === "failed" ? 0 : 1);
+    candidates.sort((a, b) => {
+      const rank = statusRank(a.exec.status) - statusRank(b.exec.status);
+      if (rank !== 0) return rank;
+      return b.exec.updatedAt.getTime() - a.exec.updatedAt.getTime();
+    });
+
+    const { exec: restored, idx } = candidates[0];
+    s.archivedExecutions.splice(idx, 1);
+
+    const storiesToRestore = s.archivedUserStories.filter((st) => st.executionId === restored.id);
+    s.archivedUserStories = s.archivedUserStories.filter((st) => st.executionId !== restored.id);
+    s.userStories.push(...storiesToRestore);
+
+    restored.updatedAt = new Date();
+    s.executions.push(restored);
+
+    return restored;
+  });
 }

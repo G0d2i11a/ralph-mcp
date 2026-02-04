@@ -1,8 +1,34 @@
 import blessed from 'blessed';
+import { statSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import { RalphState, RalphExecution } from './types';
 import { StateLoader } from './state-loader';
 
 type DisplayStatus = 'RUN' | 'MRG' | 'WAIT' | 'ERR' | 'OK';
+type ViewMode = 'main' | 'history';
+
+type ListSelection = {
+  key: string | null;
+  occurrence: number;
+  index: number;
+};
+
+type ArchivedStatus = 'merged' | 'completed' | 'failed' | 'stopped';
+
+type ArchivedHistoryEntry = {
+  key: string;
+  branch: string;
+  description: string;
+  status: string;
+  completedAtMs: number;
+  project?: string;
+  lastError?: string;
+  currentStoryId?: string;
+  currentStep?: string;
+  reconcileReason?: string;
+  retryCount?: number;
+};
 
 export class MonitorUI {
   private screen: blessed.Widgets.Screen;
@@ -14,6 +40,12 @@ export class MonitorUI {
   private selectedIndex: number = 0;
   private expandedBranches: Set<string> = new Set();
   private executionRowBranches: string[] = [];
+  private runnerStatus: 'running' | 'stopped' | 'crashed' = 'stopped';
+  private runnerError: string | null = null;
+  private viewMode: ViewMode = 'main';
+  private mainSelection: ListSelection = { key: null, occurrence: 0, index: 0 };
+  private historySelection: ListSelection = { key: null, occurrence: 0, index: 0 };
+  private historyEntries: ArchivedHistoryEntry[] = [];
 
   constructor(stateLoader: StateLoader) {
     this.stateLoader = stateLoader;
@@ -107,7 +139,7 @@ export class MonitorUI {
       left: 0,
       width: '100%',
       height: 1,
-      content: ' [q]uit [r]efresh [space]expand/collapse [Up/Down or j/k]navigate',
+      content: ' q: quit | h: history | ↑↓: navigate | Enter: expand',
       style: {
         bg: 'blue',
         fg: 'white'
@@ -123,12 +155,34 @@ export class MonitorUI {
   }
 
   private setupKeyBindings() {
-    this.screen.key(['q', 'C-c'], () => {
-      return process.exit(0);
+    this.screen.key(['C-c'], () => process.exit(0));
+
+    this.screen.key(['q'], () => {
+      if (this.viewMode === 'history') {
+        this.showMainView();
+        return;
+      }
+      process.exit(0);
+    });
+
+    this.screen.key(['escape'], () => {
+      if (this.viewMode === 'history') {
+        this.showMainView();
+      }
+    });
+
+    this.screen.key(['h', 'a'], () => {
+      if (this.viewMode === 'main') {
+        this.showHistoryView();
+      }
     });
 
     this.screen.key(['r'], () => {
       this.refresh();
+    });
+
+    this.screen.key(['t'], () => {
+      this.retrySelected();
     });
 
     this.screen.key(['space'], () => {
@@ -138,9 +192,38 @@ export class MonitorUI {
     this.executionList.key(['enter'], () => {
       this.toggleExpand();
     });
+
+    // Update detail panel when selection changes
+    this.executionList.on('select item', () => {
+      this.updateDetailPanel();
+    });
+
+    // Also handle up/down/j/k navigation
+    this.executionList.key(['up', 'down', 'j', 'k'], () => {
+      // Small delay to let blessed update the selection first
+      setImmediate(() => {
+        this.updateDetailPanel();
+      });
+    });
+  }
+
+  setRunnerStatus(status: 'running' | 'stopped' | 'crashed', error: string | null): void {
+    this.runnerStatus = status;
+    this.runnerError = error;
+  }
+
+  private updateDetailPanel() {
+    const state = this.stateLoader.loadState();
+    if (this.viewMode === 'history') {
+      this.updateHistoryLogs(state);
+    } else {
+      this.updateLogs(state);
+    }
+    this.screen.render();
   }
 
   private toggleExpand() {
+    if (this.viewMode !== 'main') return;
     const selected = (this.executionList as any).selected || 0;
     const branch = this.executionRowBranches[selected];
     if (!branch) return;
@@ -154,11 +237,90 @@ export class MonitorUI {
     this.refresh();
   }
 
-  refresh() {
+  /**
+   * Retry the selected failed execution.
+   * Directly updates state file to set status to 'ready' and reset stagnation counters.
+   */
+  private retrySelected() {
+    if (this.viewMode !== 'main') return;
     const state = this.stateLoader.loadState();
-    this.updateOverview(state);
-    this.updateExecutionList(state);
-    this.updateLogs(state);
+    const executions = this.getExecutions(state);
+    const selected = (this.executionList as any).selected || 0;
+    const selectedBranch = this.executionRowBranches[selected];
+
+    if (!selectedBranch) {
+      this.showMessage('No execution selected', 'yellow');
+      return;
+    }
+
+    const selectedExec = executions.find(e => e.branch === selectedBranch);
+    if (!selectedExec) {
+      this.showMessage('Execution not found', 'red');
+      return;
+    }
+
+    const status = ((selectedExec as any).status as string | undefined)?.toLowerCase();
+    if (status !== 'failed' && status !== 'stopped') {
+      this.showMessage(`Cannot retry: status is '${status}' (need 'failed' or 'stopped')`, 'yellow');
+      return;
+    }
+
+    this.showMessage(`Retrying ${this.stripRalphPrefix(selectedBranch)}...`, 'cyan');
+
+    try {
+      // Directly update state file
+      const RALPH_DATA_DIR = process.env.RALPH_DATA_DIR?.replace('~', homedir()) || join(homedir(), '.ralph');
+      const statePath = join(RALPH_DATA_DIR, 'state.json');
+      const stateData = JSON.parse(readFileSync(statePath, 'utf-8'));
+
+      // Find and update the execution
+      const execIndex = stateData.executions.findIndex((e: any) => e.branch === selectedBranch);
+      if (execIndex === -1) {
+        this.showMessage('Execution not found in state file', 'red');
+        return;
+      }
+
+      // Update execution status and reset stagnation counters
+      stateData.executions[execIndex].status = 'ready';
+      stateData.executions[execIndex].lastError = null;
+      stateData.executions[execIndex].launchAttempts = 0;
+      stateData.executions[execIndex].consecutiveNoProgress = 0;
+      stateData.executions[execIndex].consecutiveErrors = 0;
+      stateData.executions[execIndex].updatedAt = new Date().toISOString();
+
+      // Write back
+      writeFileSync(statePath, JSON.stringify(stateData, null, 2));
+
+      this.showMessage(`Retry initiated: ${this.stripRalphPrefix(selectedBranch)} set to 'ready'`, 'green');
+    } catch (error) {
+      this.showMessage(`Retry error: ${error instanceof Error ? error.message : String(error)}`, 'red');
+    }
+
+    // Refresh after a short delay to show updated status
+    setTimeout(() => this.refresh(), 300);
+  }
+
+  /**
+   * Show a temporary message in the log box.
+   */
+  private showMessage(message: string, color: string = 'white') {
+    const coloredMessage = `{${color}-fg}${message}{/${color}-fg}`;
+    this.logBox.setContent(coloredMessage);
+    this.screen.render();
+  }
+
+  refresh(restoreSelection: boolean = false) {
+    const state = this.stateLoader.loadState();
+    this.updateStatusBar();
+    if (this.viewMode === 'history') {
+      this.updateHistoryOverview();
+      this.updateHistoryList(state, restoreSelection ? this.historySelection : undefined);
+      this.updateHistoryLogs(state);
+    } else {
+      this.updateOverview(state);
+      this.updateExecutionList(state, restoreSelection ? this.mainSelection : undefined);
+      this.updateLogs(state);
+    }
     this.screen.render();
   }
 
@@ -172,9 +334,24 @@ export class MonitorUI {
       counts[displayStatus]++;
     });
 
+    const trueFailCount = this.getTrueFailedArchivedPrdCount(state);
+
+    // Runner status indicator
+    let runnerIndicator: string;
+    switch (this.runnerStatus) {
+      case 'running':
+        runnerIndicator = '{green-fg}Runner: ON{/green-fg}';
+        break;
+      case 'crashed':
+        runnerIndicator = `{red-fg}Runner: CRASHED{/red-fg}${this.runnerError ? ` (${this.runnerError})` : ''}`;
+        break;
+      default:
+        runnerIndicator = '{gray-fg}Runner: OFF{/gray-fg}';
+    }
+
     const content = [
-      `{cyan-fg}{bold}Ralph MCP Monitor{/bold}{/cyan-fg}  State: ${this.stateLoader.getStateFilePath()}`,
-      `PRDs: {yellow-fg}${counts.RUN} run{/yellow-fg} | {blue-fg}${counts.MRG} merge{/blue-fg} | {gray-fg}${counts.WAIT} wait{/gray-fg} | {red-fg}${counts.ERR} fail{/red-fg} | {green-fg}${counts.OK} ok{/green-fg}`,
+      `{cyan-fg}{bold}Ralph MCP Monitor{/bold}{/cyan-fg}  ${runnerIndicator}`,
+      `PRDs: {yellow-fg}${counts.RUN} run{/yellow-fg} | {blue-fg}${counts.MRG} merge{/blue-fg} | {gray-fg}${counts.WAIT} wait{/gray-fg} | {red-fg}${trueFailCount} fail{/red-fg}`,
       progress.total === 0
         ? `Stories: {gray-fg}parsing...{/gray-fg}`
         : `Stories: {green-fg}${progress.done}/${progress.total}{/green-fg} done (${Math.round(progress.done / progress.total * 100)}%)`
@@ -183,14 +360,48 @@ export class MonitorUI {
     this.overviewBox.setContent(content);
   }
 
-  private updateExecutionList(state: RalphState) {
+  private getTrueFailedArchivedPrdCount(state: RalphState): number {
+    const archived = (state as any).archivedExecutions;
+    if (!Array.isArray(archived) || archived.length === 0) return 0;
+
+    const normalizedKey = (e: any): string => {
+      const project = typeof e?.project === 'string' ? e.project : '';
+      const branch = typeof e?.branch === 'string' ? e.branch : '';
+      return `${project}::${branch}`;
+    };
+
+    const isSuccessStatus = (status: string): boolean => {
+      const normalized = status.trim().toLowerCase();
+      return normalized === 'merged';
+    };
+
+    const mergedKeys = new Set<string>();
+    for (const entry of archived) {
+      const status = typeof entry?.status === 'string' ? entry.status : '';
+      if (!status) continue;
+      if (isSuccessStatus(status)) mergedKeys.add(normalizedKey(entry));
+    }
+
+    const failedKeys = new Set<string>();
+    for (const entry of archived) {
+      const status = typeof entry?.status === 'string' ? entry.status : '';
+      if (!status) continue;
+      const normalized = status.trim().toLowerCase();
+      if (normalized !== 'failed') continue;
+
+      const key = normalizedKey(entry);
+      if (!mergedKeys.has(key)) failedKeys.add(key);
+    }
+
+    return failedKeys.size;
+  }
+
+  private updateExecutionList(state: RalphState, previousSelection?: ListSelection) {
     const executions = this.getExecutions(state);
-    const previousSelected = (this.executionList as any).selected || 0;
-    const previousBranch = this.executionRowBranches[previousSelected];
-    const previousOccurrence =
-      previousBranch
-        ? this.executionRowBranches.slice(0, previousSelected).filter(b => b === previousBranch).length
-        : 0;
+    const previous = previousSelection ?? this.captureListSelection();
+    const previousSelected = previous.index;
+    const previousBranch = previous.key;
+    const previousOccurrence = previous.occurrence;
     const items: string[] = [];
     const rowBranches: string[] = [];
 
@@ -206,7 +417,8 @@ export class MonitorUI {
       const isExpanded = this.expandedBranches.has(exec.branch);
       const expandIcon = isExpanded ? 'v' : '>';
 
-      items.push(`${expandIcon} ${statusIcon} {bold}${branchName}{/bold} ${progressLabel}`);
+      const metricsShort = this.getShortMetrics(exec);
+      items.push(`${expandIcon} ${statusIcon} {bold}${branchName}{/bold} ${progressLabel}${metricsShort ? ` ${metricsShort}` : ''}`);
       rowBranches.push(exec.branch);
 
       if (isExpanded && userStories.length > 0) {
@@ -229,110 +441,387 @@ export class MonitorUI {
     this.executionList.setItems(items);
 
     if (items.length > 0) {
-      let nextSelected = Math.max(0, Math.min(previousSelected, items.length - 1));
-
-      if (previousBranch) {
-        let occurrence = 0;
-        for (let i = 0; i < rowBranches.length; i++) {
-          if (rowBranches[i] !== previousBranch) continue;
-          if (occurrence === previousOccurrence) {
-            nextSelected = i;
-            break;
-          }
-          occurrence++;
-        }
-      }
-
+      const nextSelected = this.restoreListSelection(rowBranches, items.length, {
+        key: previousBranch,
+        occurrence: previousOccurrence,
+        index: previousSelected,
+      });
       this.executionList.select(nextSelected);
     }
   }
 
+  private updateHistoryOverview() {
+    this.overviewBox.setContent('{cyan-fg}{bold}Archived PRDs{/bold}{/cyan-fg}');
+  }
+
+  private updateHistoryList(state: RalphState, previousSelection?: ListSelection) {
+    const previous = previousSelection ?? this.captureListSelection();
+    const items: string[] = [];
+    const rowKeys: string[] = [];
+
+    const entries = this.getArchivedHistory(state, Number.MAX_SAFE_INTEGER);
+    this.historyEntries = entries;
+
+    entries.forEach(entry => {
+      const badge = this.formatArchivedStatusBadge(entry.status);
+      const branch = this.stripRalphPrefix(entry.branch);
+      const description = entry.description ? this.truncateText(entry.description.trim(), 72) : '(no description)';
+      const completedAt = entry.completedAtMs > 0 ? this.formatLocalDateTime(entry.completedAtMs) : 'unknown';
+      const status = entry.status.trim().toLowerCase();
+      const timeLabel = status === 'failed' ? 'failed' : status === 'stopped' ? 'stopped' : 'completed';
+
+      const parts: string[] = [];
+      parts.push(`${badge} ${branch} - ${description} (${timeLabel}: ${completedAt})`);
+
+      const retryCount = entry.retryCount ?? 0;
+      if (false && (status === 'merged' || status === 'completed') && retryCount > 0) {
+        parts.push(`{gray-fg}[重试: ${retryCount}次]{/gray-fg}`);
+      }
+
+      if (false && (status === 'merged' || status === 'completed') && retryCount > 0) {
+        parts.push(`{gray-fg}[重试: ${retryCount}次]{/gray-fg}`);
+      }
+
+      if ((status === 'merged' || status === 'completed') && retryCount > 0) {
+        parts.push(`{gray-fg}[\u91cd\u8bd5: ${retryCount}\u6b21]{/gray-fg}`);
+      }
+
+      if (false && (status === 'failed' || status === 'stopped')) {
+        const reason = this.getArchivedFailureReason(entry);
+        const reasonLabel = status === 'stopped' ? '原因' : '原因';
+        parts.push(`{gray-fg}[${reasonLabel}: ${this.truncateText(reason, 80)}]{/gray-fg}`);
+      }
+
+      if (false && (status === 'failed' || status === 'stopped')) {
+        const reason = this.getArchivedFailureReason(entry);
+        parts.push(`{gray-fg}[原因: ${this.truncateText(reason, 80)}]{/gray-fg}`);
+      }
+
+      if (status === 'failed' || status === 'stopped') {
+        const reason = this.getArchivedFailureReason(entry);
+        parts.push(`{gray-fg}[\u539f\u56e0: ${this.truncateText(reason, 80)}]{/gray-fg}`);
+      }
+
+      items.push(parts.join(' '));
+      rowKeys.push(entry.key);
+    });
+
+    if (items.length === 0) {
+      items.push('{gray-fg}No archived PRDs found yet.{/gray-fg}');
+    }
+
+    this.executionRowBranches = rowKeys;
+    this.executionList.setItems(items);
+
+    if (items.length > 0) {
+      const nextSelected = this.restoreListSelection(rowKeys, items.length, previous);
+      this.executionList.select(nextSelected);
+    }
+  }
+
+  private updateHistoryLogs(state: RalphState) {
+    const entries = this.historyEntries.length > 0 ? this.historyEntries : this.getArchivedHistory(state, Number.MAX_SAFE_INTEGER);
+    const selected = (this.executionList as any).selected || 0;
+    const selectedKey = this.executionRowBranches[selected];
+    const selectedEntry = selectedKey ? entries.find(e => e.key === selectedKey) : entries[selected];
+
+    const lines: string[] = [];
+
+    if (!selectedEntry) {
+      lines.push('No archived PRDs. Press Esc to go back.');
+      this.logBox.setContent(lines.join('\n'));
+      return;
+    }
+
+    const branch = this.stripRalphPrefix(selectedEntry.branch);
+    const badge = this.formatArchivedStatusBadge(selectedEntry.status);
+    const completedAt = selectedEntry.completedAtMs > 0 ? this.formatLocalDateTime(selectedEntry.completedAtMs) : 'unknown';
+    const status = selectedEntry.status.trim().toLowerCase();
+    const timeLabel = status === 'failed' ? 'Failed' : status === 'stopped' ? 'Stopped' : 'Completed';
+
+    lines.push(`{bold}${branch}{/bold}`);
+    lines.push(`Status: ${badge}`);
+    lines.push(`${timeLabel}: ${completedAt}`);
+
+    const retryCount = selectedEntry.retryCount ?? 0;
+    if ((status === 'merged' || status === 'completed') && retryCount > 0) {
+      lines.push(`Retries: ${retryCount}`);
+    }
+
+    if (status === 'failed' || status === 'stopped') {
+      lines.push(`Reason: ${this.getArchivedFailureReason(selectedEntry)}`);
+    }
+    if (selectedEntry.description) {
+      lines.push('');
+      lines.push(`{gray-fg}${selectedEntry.description.trim()}{/gray-fg}`);
+    }
+
+    this.logBox.setContent(lines.join('\n'));
+  }
+
+  private updateStatusBar() {
+    if (this.viewMode === 'history') {
+      this.statusBar.setContent(' Esc: back | ↑↓: navigate');
+      return;
+    }
+    this.statusBar.setContent(' q: quit | h: history | ↑↓: navigate | Enter: expand');
+  }
+
+  private showHistoryView() {
+    this.mainSelection = this.captureListSelection();
+    this.viewMode = 'history';
+    this.refresh(true);
+  }
+
+  private showMainView() {
+    this.historySelection = this.captureListSelection();
+    this.viewMode = 'main';
+    this.refresh(true);
+  }
+
+  private captureListSelection(): ListSelection {
+    const selected = (this.executionList as any).selected || 0;
+    const key = this.executionRowBranches[selected] ?? null;
+    const occurrence = key ? this.executionRowBranches.slice(0, selected).filter(b => b === key).length : 0;
+    return { key, occurrence, index: selected };
+  }
+
+  private restoreListSelection(rowKeys: string[], itemsLength: number, previous: ListSelection): number {
+    const maxIndex = Math.max(0, itemsLength - 1);
+    let nextSelected = Math.max(0, Math.min(previous.index, maxIndex));
+
+    if (!previous.key) return nextSelected;
+
+    let occurrence = 0;
+    for (let i = 0; i < rowKeys.length; i++) {
+      if (rowKeys[i] !== previous.key) continue;
+      if (occurrence === previous.occurrence) {
+        nextSelected = i;
+        break;
+      }
+      occurrence++;
+    }
+
+    return Math.max(0, Math.min(nextSelected, maxIndex));
+  }
+
+  private getArchivedHistory(state: RalphState, limit: number): ArchivedHistoryEntry[] {
+    const historyLike = (state as any).history;
+    if (Array.isArray(historyLike)) {
+      const parsed = historyLike
+        .filter((e: any) => e && typeof e.branch === 'string')
+        .map((e: any) => {
+          const completedAtMs = this.parseTimestamp(e.mergedAt || e.updatedAt || e.createdAt);
+          const key = `${e.branch}::${e.mergedAt || e.updatedAt || e.createdAt || ''}`;
+          return {
+            key,
+            branch: e.branch,
+            description: typeof e.description === 'string' ? e.description : '',
+            status: typeof e.status === 'string' ? e.status : '',
+            completedAtMs,
+            project: typeof e.project === 'string' ? e.project : undefined,
+            retryCount: 0,
+          };
+        })
+
+      this.populateArchivedRetryCounts(parsed);
+      parsed.sort((a, b) => b.completedAtMs - a.completedAtMs);
+      return parsed.slice(0, limit);
+    }
+
+    const archived = (state as any).archivedExecutions;
+    if (!Array.isArray(archived)) return [];
+
+    const parsed = archived
+      .filter((e: any) => e && typeof e.branch === 'string')
+      .map((e: any) => {
+        const completedAtMs = this.parseTimestamp(e.mergedAt || e.updatedAt || e.createdAt);
+        const key = `${typeof e.id === 'string' ? e.id : e.branch}::${e.mergedAt || e.updatedAt || e.createdAt || ''}`;
+        return {
+          key,
+          branch: e.branch,
+          description: typeof e.description === 'string' ? e.description : '',
+          status: typeof e.status === 'string' ? e.status : '',
+          completedAtMs,
+          project: typeof e.project === 'string' ? e.project : undefined,
+          lastError: typeof e.lastError === 'string' ? e.lastError : undefined,
+          currentStoryId: typeof e.currentStoryId === 'string' ? e.currentStoryId : undefined,
+          currentStep: typeof e.currentStep === 'string' ? e.currentStep : undefined,
+          reconcileReason: typeof e.reconcileReason === 'string' ? e.reconcileReason : undefined,
+          retryCount: 0,
+        };
+      });
+
+    this.populateArchivedRetryCounts(parsed);
+    parsed.sort((a, b) => b.completedAtMs - a.completedAtMs);
+    return parsed.slice(0, limit);
+  }
+
+  private populateArchivedRetryCounts(entries: ArchivedHistoryEntry[]): void {
+    if (entries.length === 0) return;
+
+    const isSuccessStatus = (status: string): boolean => {
+      const normalized = status.trim().toLowerCase();
+      return normalized === 'merged' || normalized === 'completed' || normalized === 'succeeded' || normalized === 'success';
+    };
+
+    const isFailedStatus = (status: string): boolean => {
+      const normalized = status.trim().toLowerCase();
+      return normalized === 'failed';
+    };
+
+    const groups = new Map<string, ArchivedHistoryEntry[]>();
+    for (const entry of entries) {
+      const project = entry.project ?? '';
+      const key = `${project}::${entry.branch}`;
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(entry);
+      else groups.set(key, [entry]);
+    }
+
+    for (const group of groups.values()) {
+      const failedCount = group.reduce((acc, entry) => acc + (isFailedStatus(entry.status || '') ? 1 : 0), 0);
+      for (const entry of group) {
+        if (isSuccessStatus(entry.status || '')) {
+          entry.retryCount = failedCount;
+        } else {
+          entry.retryCount = entry.retryCount ?? 0;
+        }
+      }
+    }
+  }
+
+  private getArchivedFailureReason(entry: ArchivedHistoryEntry): string {
+    if (entry.lastError && entry.lastError.trim().length > 0) return entry.lastError.trim();
+
+    const parts: string[] = [];
+    if (entry.currentStoryId) parts.push(entry.currentStoryId);
+    if (entry.currentStep) parts.push(entry.currentStep);
+    if (parts.length > 0) return `at ${parts.join(' ')}`;
+
+    if (entry.reconcileReason && entry.reconcileReason.trim().length > 0) return entry.reconcileReason.trim();
+
+    return 'unknown';
+  }
+
+  private formatArchivedStatusBadge(status: string): string {
+    const normalized = status.trim().toLowerCase();
+    const label = normalized.length > 0 ? normalized.toUpperCase() : 'UNKNOWN';
+
+    const color = (() => {
+      switch (normalized as ArchivedStatus) {
+        case 'merged': return 'green';
+        case 'completed': return 'blue';
+        case 'failed': return 'red';
+        case 'stopped': return 'yellow';
+        default: return 'gray';
+      }
+    })();
+
+    return `{${color}-fg}[${label}]{/${color}-fg}`;
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const d = new Date(timestampMs);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   private updateLogs(state: RalphState) {
     const executions = this.getExecutions(state);
-    const activeExecutions = executions
-      .filter(e => {
-        const displayStatus = this.getDisplayStatus(e, state);
-        return displayStatus === 'RUN' || displayStatus === 'MRG';
-      })
-      .sort((a, b) => this.compareExecutions(a, b, state))
-      .slice(0, 5);
-
     const logs: string[] = [];
 
-    if (activeExecutions.length > 0) {
-      logs.push('{bold}Active executions{/bold}');
+    // Get currently selected execution
+    const selected = (this.executionList as any).selected || 0;
+    const selectedBranch = this.executionRowBranches[selected];
+    const selectedExec = selectedBranch
+      ? executions.find(e => e.branch === selectedBranch)
+      : undefined;
 
-      activeExecutions.forEach(exec => {
-        const branchName = this.stripRalphPrefix(exec.branch);
-        const statusIcon = this.getStatusIcon(exec, state);
-        const progressLabel = this.formatExecutionProgress(exec, state);
-        logs.push(`${statusIcon} {bold}${branchName}{/bold} ${progressLabel}`);
+    if (selectedExec) {
+      // Show details for selected execution
+      const branchName = this.stripRalphPrefix(selectedExec.branch);
+      const statusIcon = this.getStatusIcon(selectedExec, state);
+      const progressLabel = this.formatExecutionProgress(selectedExec, state);
+      const logActivity = this.getLogActivity(selectedExec);
+      const activityIndicator = logActivity ? ` [${logActivity}]` : '';
 
-        const metrics = this.getExecutionMetrics(exec);
-        if (metrics) logs.push(`  ${metrics}`);
+      logs.push(`{bold}Selected: ${branchName}{/bold}`);
+      logs.push(`Status: ${statusIcon} ${progressLabel}${activityIndicator}`);
 
-        const lastError = (exec as any).lastError;
-        if (typeof lastError === 'string' && lastError.trim().length > 0) {
-          logs.push(`  {red-fg}error:{/red-fg} ${this.truncateText(lastError.trim(), 160)}`);
-        }
+      // Show description if available
+      const description = (selectedExec as any).description;
+      if (typeof description === 'string' && description.trim().length > 0) {
+        logs.push(`{gray-fg}${this.truncateText(description.trim(), 120)}{/gray-fg}`);
+      }
 
-        const stories = this.getExecutionStories(exec, state);
+      logs.push('');
+
+      // Show current activity
+      const currentActivity = this.getCurrentActivity(selectedExec);
+      if (currentActivity) {
+        logs.push(`{cyan-fg}Current:{/cyan-fg} ${currentActivity}`);
+      }
+
+      // Show metrics
+      const metrics = this.getExecutionMetrics(selectedExec);
+      if (metrics) logs.push(`{cyan-fg}Metrics:{/cyan-fg} ${metrics}`);
+
+      // Show worktree path
+      const worktreePath = (selectedExec as any).worktreePath;
+      if (typeof worktreePath === 'string') {
+        logs.push(`{cyan-fg}Path:{/cyan-fg} ${worktreePath}`);
+      }
+
+      // Show agent task ID
+      const agentTaskId = (selectedExec as any).agentTaskId;
+      if (typeof agentTaskId === 'string') {
+        logs.push(`{cyan-fg}Agent:{/cyan-fg} ${agentTaskId}`);
+      }
+
+      // Show last error if any
+      const lastError = (selectedExec as any).lastError;
+      if (typeof lastError === 'string' && lastError.trim().length > 0) {
+        logs.push('');
+        logs.push(`{red-fg}Error:{/red-fg} ${this.truncateText(lastError.trim(), 200)}`);
+      }
+
+      // Show user stories summary
+      const stories = this.getExecutionStories(selectedExec, state);
+      if (stories.length > 0) {
+        logs.push('');
+        const done = stories.filter(s => this.isStoryDone(s)).length;
+        const running = stories.filter(s => this.getStoryStatus(s) === 'running').length;
+        const pending = stories.length - done - running;
+        logs.push(`{cyan-fg}Stories:{/cyan-fg} {green-fg}${done} done{/green-fg} | {yellow-fg}${running} running{/yellow-fg} | {gray-fg}${pending} pending{/gray-fg}`);
+
+        // Show latest completed story
         const latestDone = stories.filter(s => this.isStoryDone(s)).slice(-1)[0];
         if (latestDone) {
           const storyId = this.getStoryId(latestDone);
           const title = this.getStoryTitle(latestDone, storyId);
-          logs.push(`  latest: {green-fg}${storyId}{/green-fg} ${title}`);
+          logs.push(`{cyan-fg}Latest:{/cyan-fg} {green-fg}${storyId}{/green-fg} ${title}`);
         }
-      });
+      }
     } else {
-      const recentFailed = executions
-        .filter(e => this.getDisplayStatus(e, state) === 'ERR')
-        .sort((a, b) => this.getExecutionSortTime(b) - this.getExecutionSortTime(a))
+      // Fallback: show summary when nothing selected
+      const activeExecutions = executions
+        .filter(e => {
+          const displayStatus = this.getDisplayStatus(e, state);
+          return displayStatus === 'RUN' || displayStatus === 'MRG';
+        })
         .slice(0, 3);
 
-      const recentOk = executions
-        .filter(e => this.getDisplayStatus(e, state) === 'OK')
-        .sort((a, b) => this.getExecutionSortTime(b) - this.getExecutionSortTime(a))
-        .slice(0, 3);
-
-      const waiting = executions
-        .filter(e => this.getDisplayStatus(e, state) === 'WAIT')
-        .sort((a, b) => this.getExecutionSortTime(b) - this.getExecutionSortTime(a))
-        .slice(0, 3);
-
-      if (recentFailed.length === 0 && recentOk.length === 0 && waiting.length === 0) {
-        logs.push('All quiet. No active executions.');
+      if (activeExecutions.length > 0) {
+        logs.push('{bold}Active executions{/bold}');
+        activeExecutions.forEach(exec => {
+          const branchName = this.stripRalphPrefix(exec.branch);
+          const statusIcon = this.getStatusIcon(exec, state);
+          const progressLabel = this.formatExecutionProgress(exec, state);
+          logs.push(`${statusIcon} {bold}${branchName}{/bold} ${progressLabel}`);
+        });
       } else {
-        if (recentFailed.length > 0) {
-          logs.push('{red-fg}{bold}Recent failures{/bold}{/red-fg}');
-          recentFailed.forEach(exec => {
-            const branchName = this.stripRalphPrefix(exec.branch);
-            logs.push(`{red-fg}ERR{/red-fg} {bold}${branchName}{/bold}`);
-            const lastError = (exec as any).lastError;
-            if (typeof lastError === 'string' && lastError.trim().length > 0) {
-              logs.push(`  ${this.truncateText(lastError.trim(), 180)}`);
-            }
-          });
-        }
-
-        if (waiting.length > 0) {
-          if (logs.length > 0) logs.push('');
-          logs.push('{gray-fg}{bold}Waiting{/bold}{/gray-fg}');
-          waiting.forEach(exec => {
-            const branchName = this.stripRalphPrefix(exec.branch);
-            const reason = this.getWaitReason(exec, state);
-            logs.push(`{gray-fg}WAIT{/gray-fg} {bold}${branchName}{/bold}${reason ? ` {gray-fg}(${reason}){/gray-fg}` : ''}`);
-          });
-        }
-
-        if (recentOk.length > 0) {
-          if (logs.length > 0) logs.push('');
-          logs.push('{green-fg}{bold}Recent completed{/bold}{/green-fg}');
-          recentOk.forEach(exec => {
-            const branchName = this.stripRalphPrefix(exec.branch);
-            logs.push(`{green-fg}OK{/green-fg} {bold}${branchName}{/bold}`);
-          });
-        }
+        logs.push('No execution selected. Use Up/Down to navigate.');
       }
     }
 
@@ -603,12 +1092,80 @@ export class MonitorUI {
       if (ms > 0) parts.push(`updated ${this.formatAge(ms)}`);
     }
 
-    if (typeof loopCount === 'number') parts.push(`loops:${loopCount}`);
-    if (typeof noProgress === 'number') parts.push(`no-progress:${noProgress}`);
-    if (typeof errors === 'number') parts.push(`errors:${errors}`);
-    if (typeof files === 'number') parts.push(`files:${files}`);
+    if (typeof loopCount === 'number' && loopCount > 0) parts.push(`loops:${loopCount}`);
+    if (typeof noProgress === 'number' && noProgress > 0) parts.push(`{yellow-fg}no-progress:${noProgress}{/yellow-fg}`);
+    if (typeof errors === 'number' && errors > 0) parts.push(`{red-fg}errors:${errors}{/red-fg}`);
+    if (typeof files === 'number' && files > 0) parts.push(`files:${files}`);
 
     return parts.length > 0 ? parts.join(' | ') : undefined;
+  }
+
+  private getShortMetrics(exec: RalphExecution): string {
+    const parts: string[] = [];
+
+    // Add activity/stale indicator for running/merging executions
+    const status = ((exec as any).status as string | undefined)?.toLowerCase();
+    if (status === 'running' || status === 'starting' || status === 'merging') {
+      const activity = this.getLogActivity(exec);
+      if (activity) {
+        parts.push(activity);
+      }
+    }
+
+    const loopCount = (exec as any).loopCount;
+    const noProgress = (exec as any).consecutiveNoProgress;
+    const errors = (exec as any).consecutiveErrors;
+
+    if (typeof loopCount === 'number' && loopCount > 0) {
+      parts.push(`L${loopCount}`);
+    }
+    if (typeof noProgress === 'number' && noProgress > 0) {
+      parts.push(`{yellow-fg}NP${noProgress}{/yellow-fg}`);
+    }
+    if (typeof errors === 'number' && errors > 0) {
+      parts.push(`{red-fg}E${errors}{/red-fg}`);
+    }
+
+    return parts.length > 0 ? `{gray-fg}(${parts.join('/')}){/gray-fg}` : '';
+  }
+
+  private getCurrentActivity(exec: RalphExecution): string | undefined {
+    const currentStoryId = (exec as any).currentStoryId;
+    const currentStep = (exec as any).currentStep;
+    const stepStartedAt = (exec as any).stepStartedAt;
+
+    if (!currentStoryId && !currentStep) return undefined;
+
+    const parts: string[] = [];
+
+    if (currentStoryId) {
+      parts.push(`{bold}${currentStoryId}{/bold}`);
+    }
+
+    if (currentStep) {
+      parts.push(currentStep);
+    }
+
+    if (stepStartedAt) {
+      const ms = this.parseTimestamp(stepStartedAt);
+      if (ms > 0) {
+        const elapsed = this.formatElapsed(ms);
+        parts.push(`{gray-fg}(${elapsed}){/gray-fg}`);
+      }
+    }
+
+    return parts.length > 0 ? parts.join(' ') : undefined;
+  }
+
+  private formatElapsed(startMs: number): string {
+    const deltaSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+    if (deltaSec < 60) return `${deltaSec}s`;
+    const deltaMin = Math.floor(deltaSec / 60);
+    const remainSec = deltaSec % 60;
+    if (deltaMin < 60) return `${deltaMin}m${remainSec}s`;
+    const deltaHr = Math.floor(deltaMin / 60);
+    const remainMin = deltaMin % 60;
+    return `${deltaHr}h${remainMin}m`;
   }
 
   private formatAge(timestampMs: number): string {
@@ -625,6 +1182,29 @@ export class MonitorUI {
   private truncateText(text: string, maxLen: number): string {
     if (text.length <= maxLen) return text;
     return `${text.slice(0, Math.max(0, maxLen - 3))}...`;
+  }
+
+  /**
+   * Get activity status based on log file mtime.
+   * Returns colored status indicator.
+   */
+  private getLogActivity(exec: RalphExecution): string | undefined {
+    const logPath = (exec as any).logPath;
+    if (!logPath) return undefined;
+
+    try {
+      const stat = statSync(logPath);
+      const mtime = stat.mtimeMs;
+      const age = Date.now() - mtime;
+
+      if (age < 5000) return '{green-fg}active{/green-fg}';
+      if (age < 30000) return `{yellow-fg}${Math.floor(age / 1000)}s{/yellow-fg}`;
+      if (age < 120000) return `{red-fg}${Math.floor(age / 1000)}s{/red-fg}`;
+      if (age < 300000) return `{red-fg}${Math.floor(age / 60000)}m{/red-fg}`;
+      return '{red-fg}stale{/red-fg}';
+    } catch {
+      return undefined;
+    }
   }
 
   render() {

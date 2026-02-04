@@ -5,6 +5,7 @@ import { RalphState } from './types';
 
 export class StateLoader {
   private stateFilePath: string;
+  private lastValidState: RalphState | null = null;
 
   constructor() {
     const dataDir = process.env.RALPH_DATA_DIR || path.join(os.homedir(), '.ralph');
@@ -22,9 +23,17 @@ export class StateLoader {
       }
 
       const content = fs.readFileSync(this.stateFilePath, 'utf-8');
-      return JSON.parse(content) as RalphState;
+      const state = JSON.parse(content) as RalphState;
+      // Cache successful parse
+      this.lastValidState = state;
+      return state;
     } catch (error) {
-      console.error('Failed to load state:', error);
+      // Silently return cached state on parse error (race condition with writer)
+      if (this.lastValidState) {
+        return this.lastValidState;
+      }
+      // Only log if we have no cached state to fall back to
+      // console.error('Failed to load state:', error);
       return { executions: {}, mergeQueue: [] };
     }
   }
