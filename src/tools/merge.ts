@@ -743,11 +743,17 @@ export async function mergeQueueAction(
         current: exec.branch,
         message: result.message,
       };
+    } else {
+      // Execution was deleted/archived, remove from queue and try next
+      await deleteMergeQueueByExecutionId(next.executionId);
+
+      // Recursively process next item
+      return mergeQueueAction({ action: "process" });
     }
   }
 
   return {
     queue: queue.map((q) => q.executionId),
-    message: "Unknown action",
+    message: `Unknown action: ${input.action}`,
   };
 }
