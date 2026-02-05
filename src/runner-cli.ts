@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { Runner } from "./runner.js";
 import { ClaudeLauncher } from "./utils/launcher.js";
+import { existsSync, writeFileSync } from "fs";
+import { join } from "path";
+import * as lockfile from "proper-lockfile";
+import { getRunnerConfig, RALPH_DATA_DIR } from "./store/state.js";
 
 interface CliOptions {
   interval: number;
@@ -9,11 +13,35 @@ interface CliOptions {
   timeout: number;
 }
 
+const RUNNER_INSTANCE_LOCK_PATH = join(RALPH_DATA_DIR, "runner.lock");
+
+function ensureRunnerLockFileExists(): void {
+  if (existsSync(RUNNER_INSTANCE_LOCK_PATH)) return;
+  try {
+    writeFileSync(RUNNER_INSTANCE_LOCK_PATH, "", "utf-8");
+  } catch {
+    // Ignore - lock acquisition will fail with a clear error.
+  }
+}
+
+async function acquireRunnerSingletonLock(): Promise<(() => Promise<void>) | null> {
+  ensureRunnerLockFileExists();
+  try {
+    return await lockfile.lock(RUNNER_INSTANCE_LOCK_PATH, {
+      retries: 0,
+      stale: 30000,
+      update: 5000,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function parseArgs(): CliOptions {
   const args = process.argv.slice(2);
   const options: CliOptions = {
     interval: 5000,
-    concurrency: 1,
+    concurrency: 0, // 0 = auto (use state.json runnerConfig.maxConcurrency)
     maxRetries: 3,
     timeout: 60000,
   };
@@ -72,7 +100,7 @@ Usage: ralph-runner [options]
 
 Options:
   --interval <ms>      Polling interval in milliseconds (default: 5000)
-  --concurrency <n>    Maximum concurrent PRD launches (default: 1)
+  --concurrency <n>    Maximum concurrent PRD launches (default: auto from state.json)
   --max-retries <n>    Maximum launch retry attempts (default: 3)
   --timeout <ms>       Launch timeout in milliseconds (default: 60000)
   -h, --help           Show this help message
@@ -103,6 +131,14 @@ function log(level: "info" | "warn" | "error", message: string): void {
 async function main(): Promise<void> {
   const options = parseArgs();
 
+  const releaseSingletonLock = await acquireRunnerSingletonLock();
+  if (!releaseSingletonLock) {
+    console.error(
+      `[${formatTimestamp()}] [WARN ] Another Ralph Runner instance is already running; exiting.`
+    );
+    process.exit(0);
+  }
+
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                      Ralph Runner                              ║
@@ -112,7 +148,16 @@ async function main(): Promise<void> {
 
   log("info", "Configuration:");
   log("info", `  Polling interval: ${options.interval}ms`);
-  log("info", `  Concurrency: ${options.concurrency}`);
+  const runnerConfig = await getRunnerConfig();
+  const effectiveConcurrency =
+    options.concurrency <= 0
+      ? runnerConfig.maxConcurrency
+      : Math.min(options.concurrency, runnerConfig.maxConcurrency);
+  const concurrencyLabel = options.concurrency <= 0 ? "auto" : String(options.concurrency);
+  log(
+    "info",
+    `  Concurrency: ${concurrencyLabel} (effective: ${effectiveConcurrency}, max: ${runnerConfig.maxConcurrency})`
+  );
   log("info", `  Max retries: ${options.maxRetries}`);
   log("info", `  Launch timeout: ${options.timeout}ms`);
   console.log("");
@@ -155,8 +200,12 @@ async function main(): Promise<void> {
 
     // Give some time for cleanup
     setTimeout(() => {
-      log("info", "Shutdown complete");
-      process.exit(0);
+      Promise.resolve(releaseSingletonLock())
+        .catch(() => {})
+        .finally(() => {
+          log("info", "Shutdown complete");
+          process.exit(0);
+        });
     }, 1000);
   };
 

@@ -1,9 +1,7 @@
 import { z } from "zod";
 import {
-  findExecutionByBranch,
+  claimReadyExecution,
   listUserStoriesByExecutionId,
-  updateExecution,
-  ExecutionRecord,
 } from "../store/state.js";
 import { generateAgentPrompt } from "../utils/agent.js";
 
@@ -33,43 +31,17 @@ export interface ClaimReadyResult {
  * This prevents race conditions when multiple Runners try to claim the same PRD.
  */
 export async function claimReady(input: ClaimReadyInput): Promise<ClaimReadyResult> {
-  const exec = await findExecutionByBranch(input.branch);
-
-  if (!exec) {
+  const claim = await claimReadyExecution(input.branch);
+  if (!claim.success || !claim.execution) {
     return {
       success: false,
       branch: input.branch,
-      error: `No execution found for branch: ${input.branch}`,
-    };
-  }
-
-  // Compare-and-swap: only claim if status is 'ready'
-  if (exec.status !== "ready") {
-    return {
-      success: false,
-      branch: input.branch,
-      error: `Cannot claim: status is '${exec.status}', expected 'ready'`,
-    };
-  }
-
-  // Atomically update to 'starting' and record launch attempt
-  // Note: The state.ts uses a lock mechanism, so this is safe
-  try {
-    await updateExecution(exec.id, {
-      status: "starting",
-      launchAttemptAt: new Date(),
-      launchAttempts: exec.launchAttempts + 1,
-      updatedAt: new Date(),
-    });
-  } catch (e) {
-    return {
-      success: false,
-      branch: input.branch,
-      error: `Failed to update status: ${e instanceof Error ? e.message : String(e)}`,
+      error: claim.error || "Failed to claim execution",
     };
   }
 
   // Get user stories for prompt generation
+  const exec = claim.execution;
   const stories = await listUserStoriesByExecutionId(exec.id);
 
   // Generate agent prompt

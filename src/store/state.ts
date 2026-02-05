@@ -560,6 +560,72 @@ export async function listExecutions(): Promise<ExecutionRecord[]> {
   return readState((s) => s.executions.slice());
 }
 
+export interface ClaimReadyExecutionResult {
+  success: boolean;
+  branch: string;
+  execution?: ExecutionRecord;
+  error?: string;
+  globalActive?: number;
+  maxConcurrency?: number;
+}
+
+/**
+ * Atomically claim a `ready` execution for launch by transitioning it to `starting`.
+ *
+ * This is the only safe way to claim work across multiple Runner processes because it:
+ * - validates the current status inside the same file lock (true CAS)
+ * - enforces the global `runnerConfig.maxConcurrency` limit
+ */
+export async function claimReadyExecution(branch: string): Promise<ClaimReadyExecutionResult> {
+  const now = new Date();
+  return mutateState((s) => {
+    const exec = s.executions.find((e) => e.branch === branch);
+    if (!exec) {
+      return {
+        success: false,
+        branch,
+        error: `No execution found for branch: ${branch}`,
+      };
+    }
+
+    if (exec.status !== "ready") {
+      return {
+        success: false,
+        branch,
+        error: `Cannot claim: status is '${exec.status}', expected 'ready'`,
+      };
+    }
+
+    const maxConcurrency = s.runnerConfig?.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    const globalActive = s.executions.filter(
+      (e) => e.status === "running" || e.status === "starting"
+    ).length;
+
+    if (globalActive >= maxConcurrency) {
+      return {
+        success: false,
+        branch,
+        error: `Global concurrency limit reached (${globalActive}/${maxConcurrency})`,
+        globalActive,
+        maxConcurrency,
+      };
+    }
+
+    exec.status = "starting";
+    exec.launchAttemptAt = now;
+    exec.launchAttempts = (exec.launchAttempts ?? 0) + 1;
+    exec.updatedAt = now;
+
+    return {
+      success: true,
+      branch,
+      execution: exec,
+      globalActive: globalActive + 1,
+      maxConcurrency,
+    };
+  });
+}
+
 export async function findExecutionByBranch(branch: string): Promise<ExecutionRecord | null> {
   return readState((s) => s.executions.find((e) => e.branch === branch) ?? null);
 }

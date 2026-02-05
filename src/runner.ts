@@ -4,6 +4,7 @@ import {
   findExecutionByBranch,
   ExecutionRecord,
   areDependenciesSatisfied,
+  getRunnerConfig,
 } from "./store/state.js";
 import { claimReady } from "./tools/claim-ready.js";
 import { setAgentId } from "./tools/set-agent-id.js";
@@ -80,7 +81,12 @@ export class Runner {
     }
 
     this.running = true;
-    this.log("info", `Runner started (interval: ${this.config.interval}ms, concurrency: ${this.config.concurrency})`);
+    const concurrencyLabel =
+      this.config.concurrency <= 0 ? "auto" : String(this.config.concurrency);
+    this.log(
+      "info",
+      `Runner started (interval: ${this.config.interval}ms, concurrency: ${concurrencyLabel})`
+    );
 
     // Start polling immediately
     this.poll();
@@ -218,6 +224,12 @@ export class Runner {
    * Find and process all ready PRDs.
    */
   private async processReadyPrds(): Promise<void> {
+    const runnerConfig = await getRunnerConfig();
+    const effectiveConcurrency =
+      this.config.concurrency <= 0
+        ? runnerConfig.maxConcurrency
+        : Math.min(this.config.concurrency, runnerConfig.maxConcurrency);
+
     // Get all executions
     const executions = await listExecutions();
 
@@ -233,12 +245,12 @@ export class Runner {
     const localPendingClaims = this.activeLaunches.size - localCountedInState;
     const effectiveInUse = globalActive + Math.max(0, localPendingClaims);
 
-    if (globalActive > this.config.concurrency) {
+    if (globalActive > effectiveConcurrency) {
       if (!this.warnedOverConcurrency) {
         this.warnedOverConcurrency = true;
         this.log(
           "warn",
-          `Global running/starting (${globalActive}) exceeds configured concurrency (${this.config.concurrency}). Runner will pause launching.`
+          `Global running/starting (${globalActive}) exceeds configured concurrency (${effectiveConcurrency}). Runner will pause launching.`
         );
       }
     } else {
@@ -255,9 +267,12 @@ export class Runner {
     this.log("info", `Found ${readyPrds.length} ready PRD(s)`);
 
     // Calculate available slots
-    const availableSlots = this.config.concurrency - effectiveInUse;
+    const availableSlots = effectiveConcurrency - effectiveInUse;
     if (availableSlots <= 0) {
-      this.log("info", `No available slots (${effectiveInUse}/${this.config.concurrency} in use)`);
+      this.log(
+        "info",
+        `No available slots (${effectiveInUse}/${effectiveConcurrency} in use)`
+      );
       return;
     }
 
