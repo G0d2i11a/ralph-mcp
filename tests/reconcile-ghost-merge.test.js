@@ -176,6 +176,81 @@ test("status reconcile archives a merged branch once it has diverged since start
   }
 });
 
+test("status reconcile archives a stopped execution when PRD frontmatter has mergeSha (even if branch was deleted)", async () => {
+  const repoDir = await mkdtemp(join(tmpdir(), "ralph-mcp-repo-"));
+
+  try {
+    initRepo(repoDir);
+
+    // Create branch and record base sha at "start" time.
+    git(repoDir, "git checkout -b \"ralph/prd-stopped\"");
+    const baseCommitSha = git(repoDir, "git rev-parse HEAD");
+
+    // Diverge branch with a commit.
+    writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+    git(repoDir, "git add .");
+    git(repoDir, "git commit -m \"feat: work\"");
+
+    // Merge into main and delete branch (typical Ralph merge cleanup).
+    git(repoDir, "git checkout main");
+    git(repoDir, "git merge --no-ff \"ralph/prd-stopped\" -m \"merge\"");
+    const mergeSha = git(repoDir, "git rev-parse HEAD");
+    git(repoDir, "git branch -D \"ralph/prd-stopped\"");
+
+    const prdPath = join(repoDir, "prd-stopped.md");
+    writeFileSync(
+      prdPath,
+      [
+        "---",
+        "status: completed",
+        "executedAt: 2026-02-05",
+        "branch: ralph/prd-stopped",
+        `mergeSha: ${mergeSha}`,
+        "---",
+        "",
+        "# PRD stopped",
+        "",
+      ].join("\n"),
+      "utf-8"
+    );
+
+    await state.insertExecution(
+      makeExecution({
+        id: "e-stopped",
+        branch: "ralph/prd-stopped",
+        projectRoot: repoDir,
+        prdPath,
+        status: "stopped",
+        baseCommitSha,
+      })
+    );
+
+    await state.insertMergeQueueItem({
+      executionId: "e-stopped",
+      position: 1,
+      status: "pending",
+      createdAt: new Date(),
+    });
+
+    await statusTool({});
+
+    const execs = await state.listExecutions();
+    assert.equal(execs.length, 0);
+
+    const archived = await state.listArchivedExecutions();
+    assert.equal(archived.length, 1);
+    assert.equal(archived[0].branch, "ralph/prd-stopped");
+    assert.equal(archived[0].status, "merged");
+    assert.equal(archived[0].reconcileReason, "branch_merged");
+    assert.equal(archived[0].mergeCommitSha, mergeSha);
+
+    const queue = await state.listMergeQueue();
+    assert.equal(queue.length, 0);
+  } finally {
+    await rm(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("ralph_start writes baseCommitSha at creation time (worktree=true)", async () => {
   const repoDir = await mkdtemp(join(tmpdir(), "ralph-mcp-repo-"));
   try {

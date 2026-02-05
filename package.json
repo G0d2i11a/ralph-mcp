@@ -11,6 +11,7 @@
   "scripts": {
     "test": "pnpm build && node --test --test-concurrency=1",
     "build": "tsc",
+    "check-types": "tsc --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "runner": "node dist/runner-cli.js",

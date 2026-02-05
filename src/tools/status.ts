@@ -1,8 +1,9 @@
 import { exec } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { freemem, totalmem } from "os";
 import { promisify } from "util";
 import { z } from "zod";
+import matter from "gray-matter";
 import { getConfig } from "../config/loader.js";
 import {
   listExecutions,
@@ -189,6 +190,63 @@ async function isBranchMergedToMain(
   }
 }
 
+async function getMainRef(projectRoot: string): Promise<string> {
+  try {
+    await execAsync("git rev-parse origin/main", { cwd: projectRoot });
+    return "origin/main";
+  } catch {
+    return "main";
+  }
+}
+
+async function isCommitAncestor(
+  projectRoot: string,
+  ancestor: string,
+  descendant: string
+): Promise<boolean> {
+  try {
+    await execAsync(`git merge-base --is-ancestor "${ancestor}" "${descendant}"`, {
+      cwd: projectRoot,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type PrdCompletionFrontmatter = {
+  status: string | null;
+  executedAt: string | null;
+  mergeSha: string | null;
+};
+
+function readPrdCompletionFrontmatter(prdPath: string): PrdCompletionFrontmatter | null {
+  if (!existsSync(prdPath)) return null;
+
+  try {
+    const raw = readFileSync(prdPath, "utf-8");
+
+    const data: Record<string, unknown> = prdPath.toLowerCase().endsWith(".json")
+      ? (JSON.parse(raw) as Record<string, unknown>)
+      : ((matter(raw).data as Record<string, unknown>) ?? {});
+
+    const status =
+      typeof data.status === "string" ? data.status.trim().toLowerCase() : null;
+    const executedAt = typeof data.executedAt === "string" ? data.executedAt.trim() : null;
+    const mergeSha = typeof data.mergeSha === "string" ? data.mergeSha.trim() : null;
+
+    return { status, executedAt, mergeSha };
+  } catch {
+    return null;
+  }
+}
+
+function parseDateOrNull(value: string | null): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 /**
  * Get worktree dirty status (uncommitted changes summary).
  */
@@ -364,9 +422,80 @@ async function reconcileExecutions(
   const actions: ReconcileAction[] = [];
 
   for (const exec of executions) {
-    // Skip already merged or stopped executions
-    if (exec.status === "merged" || exec.status === "stopped") {
+    // Skip terminal state
+    if (exec.status === "merged") {
       continue;
+    }
+
+    const isStopped = exec.status === "stopped";
+
+    // If the PRD frontmatter has a mergeSha, it is the strongest signal that the PRD has been merged.
+    // This also lets us recover from partial failures where the git branch was deleted after merge,
+    // but state.json didn't get updated (e.g. process crash / manual merge).
+    const prdMeta = readPrdCompletionFrontmatter(exec.prdPath);
+    const prdMergeSha = prdMeta?.mergeSha ?? null;
+
+    if (prdMergeSha && exec.baseCommitSha) {
+      const mainRef = await getMainRef(exec.projectRoot);
+      const isOnMain = await isCommitAncestor(exec.projectRoot, prdMergeSha, mainRef);
+      const baseBeforeMerge = await isCommitAncestor(exec.projectRoot, exec.baseCommitSha, prdMergeSha);
+
+      if (isOnMain && baseBeforeMerge) {
+        try {
+          logReconcile(exec, "archiving: prd frontmatter mergeSha indicates merged", {
+            prdMergeSha,
+            mainRef,
+            baseCommitSha: exec.baseCommitSha,
+          });
+
+          if (exec.worktreePath) {
+            try {
+              await removeWorktree(exec.projectRoot, exec.worktreePath);
+            } catch {
+              // Worktree might already be gone
+            }
+          }
+
+          const mergedAt = parseDateOrNull(prdMeta?.executedAt ?? null) ?? new Date();
+
+          await updateExecution(
+            exec.id,
+            {
+              status: "merged",
+              mergedAt,
+              mergeCommitSha: prdMergeSha,
+              reconcileReason: "branch_merged" as ReconcileReason,
+              updatedAt: new Date(),
+            },
+            { skipTransitionValidation: true }
+          );
+
+          await archiveExecution(exec.id);
+
+          actions.push({
+            branch: exec.branch,
+            previousStatus: exec.status,
+            action: "archived",
+            reason: "PRD frontmatter has mergeSha (treating as merged)",
+          });
+          continue;
+        } catch (error) {
+          actions.push({
+            branch: exec.branch,
+            previousStatus: exec.status,
+            action: "skipped",
+            reason: `Failed to archive (prd mergeSha): ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      } else {
+        logReconcile(exec, "skip: prd mergeSha present but not verifiable", {
+          prdMergeSha,
+          mainRef,
+          baseCommitSha: exec.baseCommitSha,
+          isOnMain,
+          baseBeforeMerge,
+        });
+      }
     }
 
     // Check if branch is already merged
@@ -440,6 +569,12 @@ async function reconcileExecutions(
           reason: `Failed to archive: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
+    }
+
+    // Preserve semantics of "stopped": treat it as user-controlled pause.
+    // We only reconcile it into an archive when we can prove it was merged above.
+    if (isStopped) {
+      continue;
     }
 
     // Check if branch was deleted
