@@ -582,6 +582,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start server
 let runnerProcess: ChildProcess | null = null;
+let runnerHeartbeatTimer: NodeJS.Timeout | null = null;
 
 function startRunner(): void {
   // Get the directory of the current module
@@ -597,10 +598,21 @@ function startRunner(): void {
 
   try {
     runnerProcess = spawn("node", [runnerPath], {
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
       detached: false,
       env: { ...process.env, RALPH_RUNNER_SPAWNED: "true" },
     });
+
+    runnerHeartbeatTimer = setInterval(() => {
+      if (!runnerProcess) return;
+      if (!runnerProcess.connected) return;
+      try {
+        runnerProcess.send({ type: "ralph:heartbeat", ts: Date.now() });
+      } catch {
+        // Ignore - disconnect will be handled by the child watchdog.
+      }
+    }, 5000);
+    runnerHeartbeatTimer.unref();
 
     runnerProcess.on("error", (err) => {
       console.error("Failed to start Ralph Runner:", err.message);
@@ -609,6 +621,10 @@ function startRunner(): void {
     runnerProcess.on("exit", (code) => {
       if (code !== 0 && code !== null) {
         console.error(`Ralph Runner exited with code ${code}`);
+      }
+      if (runnerHeartbeatTimer) {
+        clearInterval(runnerHeartbeatTimer);
+        runnerHeartbeatTimer = null;
       }
       runnerProcess = null;
     });
@@ -621,6 +637,17 @@ function startRunner(): void {
 
 function stopRunner(): void {
   if (runnerProcess) {
+    if (runnerHeartbeatTimer) {
+      clearInterval(runnerHeartbeatTimer);
+      runnerHeartbeatTimer = null;
+    }
+    try {
+      if (runnerProcess.connected) {
+        runnerProcess.send({ type: "ralph:shutdown", reason: "MCP server exiting" });
+      }
+    } catch {
+      // Ignore
+    }
     runnerProcess.kill();
     runnerProcess = null;
     console.error("Ralph Runner stopped");
