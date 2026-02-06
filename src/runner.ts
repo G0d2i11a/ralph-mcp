@@ -8,6 +8,7 @@ import {
 } from "./store/state.js";
 import { claimReady } from "./tools/claim-ready.js";
 import { setAgentId } from "./tools/set-agent-id.js";
+import { retry } from "./tools/retry.js";
 import { calculateMemoryConcurrency } from "./utils/memory-concurrency.js";
 import { evaluateExecutionStaleness, type StaleDetectionConfig } from "./utils/stale-detection.js";
 import { getConfig } from "./config/loader.js";
@@ -132,6 +133,9 @@ export class Runner {
 
       // Check for timed-out starting PRDs
       await this.recoverTimedOutPrds();
+
+      // Auto-recover interrupted PRDs (e.g., from Claude Code restart)
+      await this.autoRecoverInterrupted();
 
       // Promote pending PRDs whose dependencies are now satisfied
       await this.promotePendingPrds();
@@ -292,6 +296,35 @@ export class Runner {
           lastError: `Launch timeout (attempt ${prd.launchAttempts})`,
           updatedAt: new Date(),
         });
+      }
+    }
+  }
+
+  /**
+   * Auto-recover interrupted PRDs.
+   * When Claude Code is restarted, running agents are killed and PRDs become "interrupted".
+   * This method automatically calls retry() to set them back to "ready" for the Runner to pick up.
+   */
+  private async autoRecoverInterrupted(): Promise<void> {
+    const executions = await listExecutions();
+    const interrupted = executions.filter((e) => e.status === "interrupted");
+
+    for (const exec of interrupted) {
+      try {
+        this.log("info", `Auto-recovering interrupted PRD: ${exec.branch}`);
+
+        const result = await retry({
+          branch: exec.branch,
+          wipPolicy: "stash",
+        });
+
+        if (result.success) {
+          this.log("info", `Auto-recovered ${exec.branch} -> ready (${result.progress.completed}/${result.progress.total} stories)`);
+        } else {
+          this.log("warn", `Failed to auto-recover ${exec.branch}: ${result.message}`);
+        }
+      } catch (error) {
+        this.log("warn", `Error auto-recovering ${exec.branch}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
