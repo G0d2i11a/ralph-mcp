@@ -22,6 +22,7 @@ import { retry, retryInputSchema } from "./tools/retry.js";
 import { doctor, doctorInputSchema } from "./tools/doctor.js";
 import { claimReady, claimReadyInputSchema } from "./tools/claim-ready.js";
 import { setConcurrency, setConcurrencyInputSchema } from "./tools/set-concurrency.js";
+import { shutdown, shutdownInputSchema, setShutdownCallback } from "./tools/shutdown.js";
 
 const server = new Server(
   {
@@ -500,6 +501,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["maxConcurrent"],
         },
       },
+      {
+        name: "ralph_shutdown",
+        description:
+          "Shutdown the Ralph MCP Server and Runner. Use this to manually stop the MCP when you want to restart it with new code.",
+        annotations: {
+          title: "Shutdown MCP",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            reason: {
+              type: "string",
+              description: "Optional reason for shutdown",
+            },
+            force: {
+              type: "boolean",
+              description: "Force shutdown even if PRDs are running (default: false)",
+              default: false,
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -553,6 +580,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "ralph_set_concurrency":
         result = await setConcurrency(setConcurrencyInputSchema.parse(args));
+        break;
+      case "ralph_shutdown":
+        result = await shutdown(shutdownInputSchema.parse(args || {}));
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -661,6 +691,13 @@ async function main() {
 
   // Auto-start Runner
   startRunner();
+
+  // Set shutdown callback for the shutdown tool
+  setShutdownCallback((reason) => {
+    console.error(`Shutdown requested: ${reason}`);
+    stopRunner();
+    process.exit(0);
+  });
 
   // Cleanup on exit
   process.on("SIGINT", () => {
