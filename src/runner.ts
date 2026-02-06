@@ -4,10 +4,10 @@ import {
   findExecutionByBranch,
   ExecutionRecord,
   areDependenciesSatisfied,
-  getRunnerConfig,
 } from "./store/state.js";
 import { claimReady } from "./tools/claim-ready.js";
 import { setAgentId } from "./tools/set-agent-id.js";
+import { calculateMemoryConcurrency } from "./utils/memory-concurrency.js";
 
 export interface RunnerConfig {
   /** Polling interval in milliseconds (default: 5000) */
@@ -224,11 +224,21 @@ export class Runner {
    * Find and process all ready PRDs.
    */
   private async processReadyPrds(): Promise<void> {
-    const runnerConfig = await getRunnerConfig();
+    // Use dynamic memory-based concurrency calculation
+    const memConcurrency = await calculateMemoryConcurrency();
     const effectiveConcurrency =
       this.config.concurrency <= 0
-        ? runnerConfig.maxConcurrency
-        : Math.min(this.config.concurrency, runnerConfig.maxConcurrency);
+        ? memConcurrency.effectiveConcurrency
+        : Math.min(this.config.concurrency, memConcurrency.effectiveConcurrency);
+
+    // Log memory status periodically
+    if (memConcurrency.pausedDueToMemory) {
+      this.log(
+        "warn",
+        `Paused due to low memory (${memConcurrency.freeMemoryGB}GB free, need ${2 + 0.8}GB minimum)`
+      );
+      return;
+    }
 
     // Get all executions
     const executions = await listExecutions();

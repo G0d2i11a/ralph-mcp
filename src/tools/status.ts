@@ -1,6 +1,5 @@
 import { exec } from "child_process";
 import { existsSync, readFileSync } from "fs";
-import { freemem, totalmem } from "os";
 import { promisify } from "util";
 import { z } from "zod";
 import matter from "gray-matter";
@@ -13,7 +12,6 @@ import {
   deleteMergeQueueByExecutionId,
   updateExecution,
   archiveExecution,
-  getRunnerConfig,
   ExecutionRecord,
   type ExecutionPriority,
   ReconcileReason,
@@ -24,6 +22,7 @@ import {
   type StaleDetectionConfig,
   type StaleDecision,
 } from "../utils/stale-detection.js";
+import { calculateMemoryConcurrency } from "../utils/memory-concurrency.js";
 
 const execAsync = promisify(exec);
 
@@ -841,29 +840,17 @@ export async function status(input: StatusInput): Promise<StatusResult> {
   };
 
   // Dynamic memory-based concurrency calculation
-  const runnerConfig = await getRunnerConfig();
-  const freeMemBytes = freemem();
-  const totalMemBytes = totalmem();
-  const freeMemoryPercent = (freeMemBytes / totalMemBytes) * 100;
-  const freeMemGB = freeMemBytes / (1024 * 1024 * 1024);
-
-  // Reserve 2GB for system + other apps, each agent needs ~800MB
-  const RESERVED_GB = 2;
-  const MEM_PER_AGENT_GB = 0.8;
-  const availableForAgents = Math.max(0, freeMemGB - RESERVED_GB);
-  const calculatedConcurrency = Math.floor(availableForAgents / MEM_PER_AGENT_GB);
-  const effectiveConcurrency = Math.min(calculatedConcurrency, runnerConfig.maxConcurrency);
-  const pausedDueToMemory = effectiveConcurrency === 0;
+  const memConcurrency = await calculateMemoryConcurrency();
 
   const result: StatusResult = {
     executions: executionStatuses,
     summary,
     system: {
-      freeMemoryPercent: Number(freeMemoryPercent.toFixed(1)),
-      freeMemoryGB: Number(freeMemGB.toFixed(1)),
-      effectiveConcurrency,
-      maxConcurrency: runnerConfig.maxConcurrency,
-      pausedDueToMemory,
+      freeMemoryPercent: memConcurrency.freeMemoryPercent,
+      freeMemoryGB: memConcurrency.freeMemoryGB,
+      effectiveConcurrency: memConcurrency.effectiveConcurrency,
+      maxConcurrency: memConcurrency.maxConcurrency,
+      pausedDueToMemory: memConcurrency.pausedDueToMemory,
     },
     overallState,
     history,
