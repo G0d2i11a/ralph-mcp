@@ -88,7 +88,7 @@ export type ConflictStrategy = "auto_theirs" | "auto_ours" | "notify" | "agent";
 /**
  * Reason for reconciliation (when execution is archived by reconcile).
  */
-export type ReconcileReason = "branch_merged" | "branch_deleted" | "worktree_missing" | null;
+export type ReconcileReason = "branch_merged" | "branch_deleted" | "worktree_missing" | "stories_completed_repair" | null;
 
 /**
  * Get a human-readable error message for invalid transitions.
