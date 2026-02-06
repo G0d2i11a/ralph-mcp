@@ -160,16 +160,17 @@ export async function retry(input: RetryInput): Promise<RetryResult> {
 
   const previousStatus = exec.status;
 
-  // Allow retry for failed, stopped, or running (interrupted) executions
+  // Allow retry for failed, stopped, interrupted, or running (stale) executions
   if (
     previousStatus !== "failed" &&
     previousStatus !== "stopped" &&
-    previousStatus !== "running"
+    previousStatus !== "running" &&
+    previousStatus !== "interrupted"
   ) {
     return {
       success: false,
       branch: input.branch,
-      message: `Cannot retry execution with status '${previousStatus}'. Only 'failed', 'stopped', or 'running' (interrupted) executions can be retried.`,
+      message: `Cannot retry execution with status '${previousStatus}'. Only 'failed', 'stopped', 'interrupted', or 'running' (stale) executions can be retried.`,
       previousStatus,
       agentPrompt: null,
       progress: { completed: 0, total: 0, percentage: 0 },
