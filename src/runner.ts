@@ -92,8 +92,52 @@ export class Runner {
       `Runner started (interval: ${this.config.interval}ms, concurrency: ${concurrencyLabel})`
     );
 
-    // Start polling immediately
-    this.poll();
+    // On startup, immediately recover orphaned agents (don't wait for stale detection)
+    this.recoverOrphanedAgents().then(() => {
+      // Start polling after initial recovery
+      this.poll();
+    });
+  }
+
+  /**
+   * Recover orphaned agents on Runner startup.
+   * When Claude Code restarts, running agents are killed but PRD status remains "running".
+   * This method immediately marks them as interrupted for auto-recovery.
+   */
+  private async recoverOrphanedAgents(): Promise<void> {
+    const executions = await listExecutions();
+    const running = executions.filter((e) => e.status === "running");
+
+    if (running.length === 0) return;
+
+    this.log("info", `Checking ${running.length} running PRD(s) for orphaned agents...`);
+
+    for (const exec of running) {
+      // Skip if being actively launched
+      if (this.activeLaunches.has(exec.branch)) continue;
+
+      // Check if all stories are already complete
+      const stories = await listUserStoriesByExecutionId(exec.id);
+      const allComplete = stories.length > 0 && stories.every((s) => s.passes);
+
+      if (allComplete) {
+        this.log("info", `${exec.branch}: all stories complete, marking completed`);
+        await updateExecution(exec.id, {
+          status: "completed",
+          lastError: null,
+          updatedAt: new Date(),
+        }, { skipTransitionValidation: true });
+        continue;
+      }
+
+      // Mark as interrupted for immediate recovery by autoRecoverInterrupted()
+      this.log("info", `${exec.branch}: marking interrupted for recovery (orphaned agent)`);
+      await updateExecution(exec.id, {
+        status: "interrupted",
+        lastError: "Agent orphaned: Runner restarted",
+        updatedAt: new Date(),
+      }, { skipTransitionValidation: true });
+    }
   }
 
   /**
@@ -153,16 +197,16 @@ export class Runner {
   }
 
   /**
-   * Reconcile running/failed executions:
+   * Reconcile running/failed/stopped executions:
    * - Mark stale running PRDs as interrupted
-   * - Mark failed PRDs with all stories complete as completed
+   * - Mark PRDs with all stories complete as completed
    */
   private async reconcileActiveExecutions(): Promise<void> {
     const executions = await listExecutions();
 
     for (const exec of executions) {
-      // Skip non-active states and terminal states
-      if (!["running", "failed"].includes(exec.status)) continue;
+      // Check running, failed, and stopped states
+      if (!["running", "failed", "stopped"].includes(exec.status)) continue;
 
       // Skip PRDs being actively launched by this Runner
       if (this.activeLaunches.has(exec.branch)) continue;
