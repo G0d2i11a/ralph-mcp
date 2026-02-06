@@ -649,6 +649,39 @@ async function reconcileExecutions(
       }
     }
 
+    // Check if failed/interrupted execution actually completed all stories
+    // This repairs the invariant: all stories pass => status = completed
+    if (exec.status === "failed" || exec.status === "interrupted") {
+      try {
+        const stories = await listUserStoriesByExecutionId(exec.id);
+        const allComplete = stories.length > 0 && stories.every((s) => s.passes);
+
+        if (allComplete) {
+          await updateExecution(exec.id, {
+            status: "completed",
+            lastError: null,
+            reconcileReason: "stories_completed_repair" as ReconcileReason,
+            updatedAt: new Date(),
+          }, { skipTransitionValidation: true });
+
+          actions.push({
+            branch: exec.branch,
+            previousStatus: exec.status,
+            action: "marked_completed",
+            reason: "All stories complete despite previous failure status",
+          });
+          continue;
+        }
+      } catch (error) {
+        actions.push({
+          branch: exec.branch,
+          previousStatus: exec.status,
+          action: "skipped",
+          reason: `Failed to check story completion: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
     // Check if running execution is interrupted (zombie)
     const { interrupted, reason } = await isExecutionInterrupted(exec);
     if (interrupted && reason) {

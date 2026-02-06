@@ -4,10 +4,13 @@ import {
   findExecutionByBranch,
   ExecutionRecord,
   areDependenciesSatisfied,
+  listUserStoriesByExecutionId,
 } from "./store/state.js";
 import { claimReady } from "./tools/claim-ready.js";
 import { setAgentId } from "./tools/set-agent-id.js";
 import { calculateMemoryConcurrency } from "./utils/memory-concurrency.js";
+import { evaluateExecutionStaleness, type StaleDetectionConfig } from "./utils/stale-detection.js";
+import { getConfig } from "./config/loader.js";
 
 export interface RunnerConfig {
   /** Polling interval in milliseconds (default: 5000) */
@@ -124,7 +127,10 @@ export class Runner {
     if (!this.running) return;
 
     try {
-      // First, check for timed-out starting PRDs
+      // First, reconcile running/failed executions (detect stale agents, fix completed)
+      await this.reconcileActiveExecutions();
+
+      // Check for timed-out starting PRDs
       await this.recoverTimedOutPrds();
 
       // Promote pending PRDs whose dependencies are now satisfied
@@ -139,6 +145,76 @@ export class Runner {
     // Schedule next poll
     if (this.running) {
       this.pollTimer = setTimeout(() => this.poll(), this.config.interval);
+    }
+  }
+
+  /**
+   * Reconcile running/failed executions:
+   * - Mark stale running PRDs as interrupted
+   * - Mark failed PRDs with all stories complete as completed
+   */
+  private async reconcileActiveExecutions(): Promise<void> {
+    const executions = await listExecutions();
+
+    for (const exec of executions) {
+      // Skip non-active states and terminal states
+      if (!["running", "failed"].includes(exec.status)) continue;
+
+      // Skip PRDs being actively launched by this Runner
+      if (this.activeLaunches.has(exec.branch)) continue;
+
+      try {
+        // Check story completion for both running and failed
+        const stories = await listUserStoriesByExecutionId(exec.id);
+        const allComplete = stories.length > 0 && stories.every((s) => s.passes);
+
+        if (allComplete) {
+          // Invariant: all stories pass => completed
+          this.log("info", `All stories complete for ${exec.branch}, marking completed`);
+          await updateExecution(exec.id, {
+            status: "completed",
+            lastError: null,
+            updatedAt: new Date(),
+          }, { skipTransitionValidation: true });
+          continue;
+        }
+
+        // For running PRDs, check if stale
+        if (exec.status === "running") {
+          const config = getConfig(exec.projectRoot);
+          const staleConfig: StaleDetectionConfig = {
+            enabled: config.agent.staleDetection.enabled,
+            timeoutsMs: config.agent.staleDetection.timeoutsMs,
+            signals: config.agent.staleDetection.signals,
+            maxFilesToStat: config.agent.staleDetection.maxFilesToStat,
+            logTailBytes: config.agent.staleDetection.logTailBytes,
+          };
+
+          const decision = await evaluateExecutionStaleness(
+            {
+              updatedAt: exec.updatedAt,
+              currentStep: exec.currentStep,
+              lastError: exec.lastError,
+              projectRoot: exec.projectRoot,
+              worktreePath: exec.worktreePath,
+              logPath: exec.logPath,
+            },
+            staleConfig
+          );
+
+          if (decision.isStale) {
+            const idleMinutes = Math.round(decision.idleMs / 60000);
+            this.log("warn", `${exec.branch} is stale (idle ${idleMinutes}m), marking interrupted`);
+            await updateExecution(exec.id, {
+              status: "interrupted",
+              lastError: `Agent stale: no activity for ${idleMinutes} minutes`,
+              updatedAt: new Date(),
+            }, { skipTransitionValidation: true });
+          }
+        }
+      } catch (error) {
+        this.log("warn", `Failed to reconcile ${exec.branch}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 
