@@ -1,5 +1,5 @@
 import blessed from 'blessed';
-import { statSync, readFileSync, writeFileSync } from 'fs';
+import { statSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { RalphState, RalphExecution } from './types';
@@ -181,6 +181,10 @@ export class MonitorUI {
       this.refresh();
     });
 
+    this.screen.key(['S'], () => {
+      this.shutdownMcp();
+    });
+
     this.screen.key(['t'], () => {
       this.retrySelected();
     });
@@ -307,6 +311,72 @@ export class MonitorUI {
     const coloredMessage = `{${color}-fg}${message}{/${color}-fg}`;
     this.logBox.setContent(coloredMessage);
     this.screen.render();
+  }
+
+  /**
+   * Shutdown MCP by writing a signal file.
+   * MCP server will detect this file and exit gracefully.
+   */
+  private shutdownMcp() {
+    const RALPH_DATA_DIR = process.env.RALPH_DATA_DIR?.replace('~', homedir()) || join(homedir(), '.ralph');
+    const signalPath = join(RALPH_DATA_DIR, 'shutdown-signal');
+
+    // Check if there are running PRDs
+    const state = this.stateLoader.loadState();
+    const executions = this.getExecutions(state);
+    const running = executions.filter(e => {
+      const status = ((e as any).status as string | undefined)?.toLowerCase();
+      return status === 'running' || status === 'starting';
+    });
+
+    if (running.length > 0) {
+      // Show confirmation dialog
+      const dialog = blessed.question({
+        parent: this.screen,
+        border: 'line',
+        height: 'shrink',
+        width: 'half',
+        top: 'center',
+        left: 'center',
+        label: ' Confirm Shutdown ',
+        tags: true,
+        keys: true,
+        vi: true,
+        style: {
+          border: { fg: 'red' },
+          bg: 'black',
+          fg: 'white',
+        },
+      });
+
+      dialog.ask(`{yellow-fg}${running.length} PRD(s) are still running.{/yellow-fg}\nShutdown MCP anyway? (y/n)`, (err, confirmed) => {
+        dialog.destroy();
+        this.screen.render();
+        if (confirmed) {
+          this.writeShutdownSignal(signalPath);
+        }
+      });
+    } else {
+      this.writeShutdownSignal(signalPath);
+    }
+  }
+
+  private writeShutdownSignal(signalPath: string) {
+    try {
+      writeFileSync(signalPath, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        source: 'monitor-tui',
+        reason: 'User requested shutdown via S key',
+      }));
+      this.showMessage('Shutdown signal sent. MCP will exit shortly.', 'green');
+
+      // Exit monitor after a short delay
+      setTimeout(() => {
+        process.exit(0);
+      }, 1500);
+    } catch (error) {
+      this.showMessage(`Failed to send shutdown signal: ${error instanceof Error ? error.message : String(error)}`, 'red');
+    }
   }
 
   refresh(restoreSelection: boolean = false) {
@@ -564,7 +634,7 @@ export class MonitorUI {
       this.statusBar.setContent(' Esc: back | ↑↓: navigate');
       return;
     }
-    this.statusBar.setContent(' q: quit | h: history | ↑↓: navigate | Enter: expand');
+    this.statusBar.setContent(' q: quit | h: history | S: shutdown MCP | ↑↓: navigate | Enter: expand');
   }
 
   private showHistoryView() {

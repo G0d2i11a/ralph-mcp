@@ -8,6 +8,8 @@ import {
 import { spawn, ChildProcess } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { existsSync, unlinkSync } from "fs";
+import { homedir } from "os";
 
 import { start, startInputSchema } from "./tools/start.js";
 import { batchStart, batchStartInputSchema } from "./tools/batch-start.js";
@@ -698,6 +700,26 @@ async function main() {
     stopRunner();
     process.exit(0);
   });
+
+  // Watch for shutdown signal file (from Monitor TUI)
+  const dataDir = process.env.RALPH_DATA_DIR?.replace("~", homedir()) || join(homedir(), ".ralph");
+  const signalPath = join(dataDir, "shutdown-signal");
+  let signalCheckTimer: NodeJS.Timeout | null = null;
+
+  signalCheckTimer = setInterval(() => {
+    if (existsSync(signalPath)) {
+      try {
+        unlinkSync(signalPath); // Remove the signal file
+        console.error("Shutdown signal detected from Monitor TUI");
+        stopRunner();
+        if (signalCheckTimer) clearInterval(signalCheckTimer);
+        process.exit(0);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+  }, 1000);
+  signalCheckTimer.unref(); // Don't prevent process exit
 
   // Cleanup on exit
   process.on("SIGINT", () => {
