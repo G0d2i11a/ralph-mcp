@@ -4,6 +4,11 @@ import { findExecutionByBranch, updateExecution } from "../store/state.js";
 export const setAgentIdInputSchema = z.object({
   branch: z.string().describe("Branch name"),
   agentTaskId: z.string().describe("Claude Task agent ID"),
+  logPath: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Path to agent log file (for activity monitoring)"),
 });
 
 export type SetAgentIdInput = z.infer<typeof setAgentIdInputSchema>;
@@ -25,6 +30,7 @@ export async function setAgentId(input: SetAgentIdInput): Promise<SetAgentIdResu
   // Update agent task ID and status
   await updateExecution(exec.id, {
     agentTaskId: input.agentTaskId,
+    ...(input.logPath !== undefined ? { logPath: input.logPath } : {}),
     status: "running",
     updatedAt: new Date(),
   });

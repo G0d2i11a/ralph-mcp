@@ -160,16 +160,17 @@ export async function retry(input: RetryInput): Promise<RetryResult> {
 
   const previousStatus = exec.status;
 
-  // Allow retry for failed, stopped, or running (interrupted) executions
+  // Allow retry for failed, stopped, interrupted, or running (stale) executions
   if (
     previousStatus !== "failed" &&
     previousStatus !== "stopped" &&
-    previousStatus !== "running"
+    previousStatus !== "running" &&
+    previousStatus !== "interrupted"
   ) {
     return {
       success: false,
       branch: input.branch,
-      message: `Cannot retry execution with status '${previousStatus}'. Only 'failed', 'stopped', or 'running' (interrupted) executions can be retried.`,
+      message: `Cannot retry execution with status '${previousStatus}'. Only 'failed', 'stopped', 'interrupted', or 'running' (stale) executions can be retried.`,
       previousStatus,
       agentPrompt: null,
       progress: { completed: 0, total: 0, percentage: 0 },
@@ -209,17 +210,50 @@ export async function retry(input: RetryInput): Promise<RetryResult> {
   // Reset stagnation counters
   await resetStagnation(exec.id);
 
-  // Set status back to running
-  await updateExecution(exec.id, {
-    status: "running",
-    lastError: null,
-    updatedAt: new Date(),
-  });
-
   // Get stories and generate new agent prompt
   const stories = await listUserStoriesByExecutionId(exec.id);
   const completed = stories.filter((s) => s.passes).length;
   const total = stories.length;
+
+  // Check if all stories are already complete
+  const allComplete = total > 0 && completed === total;
+
+  if (allComplete) {
+    // All stories done - set to completed, not running
+    await updateExecution(exec.id, {
+      status: "completed",
+      lastError: null,
+      updatedAt: new Date(),
+    });
+
+    return {
+      success: true,
+      branch: input.branch,
+      message: `Execution resumed. 0 stories remaining.`,
+      previousStatus,
+      agentPrompt: "All user stories are complete. No action needed.",
+      progress: {
+        completed,
+        total,
+        percentage: 100,
+      },
+      wipHandled: {
+        policy: input.wipPolicy || "stash",
+        action: wipResult.action,
+        details: wipResult.details,
+      },
+      worktreeRestored,
+    };
+  }
+
+  // Set status to ready so Runner can pick it up (not running - that's set after agent launches)
+  // IMPORTANT: Reset launchAttempts to allow Runner to retry
+  await updateExecution(exec.id, {
+    status: "ready",
+    lastError: null,
+    launchAttempts: 0,
+    updatedAt: new Date(),
+  });
 
   // Build context about the resume
   const resumeContext = [

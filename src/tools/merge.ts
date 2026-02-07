@@ -15,14 +15,18 @@ import {
   updateTodoDoc,
   updateProjectStatus,
   handleSchemaConflict,
+  updatePrdMetadata,
+  updatePrdIndex,
 } from "../utils/merge-helpers.js";
 import { execSync } from "child_process";
 import {
+  archiveExecution,
   deleteMergeQueueByExecutionId,
   findExecutionByBranch,
   findExecutionById,
   insertMergeQueueItem,
   listExecutions,
+  listArchivedExecutions,
   listMergeQueue,
   listUserStoriesByExecutionId,
   updateExecution,
@@ -41,6 +45,19 @@ export const mergeInputSchema = z.object({
 
 export type MergeInput = z.infer<typeof mergeInputSchema>;
 
+/**
+ * Summary of completion when all PRDs are done.
+ */
+export interface CompletionSummary {
+  mergedPrd: {
+    branch: string;
+    description: string;
+    commitHash: string | null;
+  };
+  totalMerged: number;
+  totalDurationMs: number | null; // From first PRD start to last merge
+}
+
 export interface MergeResult {
   success: boolean;
   branch: string;
@@ -54,6 +71,55 @@ export interface MergeResult {
   docsUpdated?: string[];
   mergedStories?: string[];
   message: string;
+  // Global completion notification
+  allComplete?: boolean;
+  completionSummary?: CompletionSummary;
+}
+
+/**
+ * Check if all executions are complete and build completion summary.
+ */
+async function checkAllComplete(
+  mergedExec: { branch: string; description: string },
+  commitHash: string | null
+): Promise<{ allComplete: boolean; completionSummary?: CompletionSummary }> {
+  const activeExecutions = await listExecutions();
+
+  // Check if there are any active (non-terminal) executions
+  const hasActiveExecutions = activeExecutions.some((e) =>
+    e.status === "running" || e.status === "pending" || e.status === "ready" ||
+    e.status === "starting" || e.status === "merging" || e.status === "completed"
+  );
+
+  if (hasActiveExecutions) {
+    return { allComplete: false };
+  }
+
+  // All executions are done - build completion summary
+  const archivedExecutions = await listArchivedExecutions();
+  const mergedExecutions = archivedExecutions.filter((e) => e.status === "merged");
+
+  // Calculate total duration from first PRD start to now
+  let totalDurationMs: number | null = null;
+  if (mergedExecutions.length > 0) {
+    const earliestStart = Math.min(
+      ...mergedExecutions.map((e) => e.createdAt.getTime())
+    );
+    totalDurationMs = Date.now() - earliestStart;
+  }
+
+  return {
+    allComplete: true,
+    completionSummary: {
+      mergedPrd: {
+        branch: mergedExec.branch,
+        description: mergedExec.description,
+        commitHash,
+      },
+      totalMerged: mergedExecutions.length,
+      totalDurationMs,
+    },
+  };
 }
 
 export async function merge(input: MergeInput): Promise<MergeResult> {
@@ -169,7 +235,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     );
 
     if (mergeResult.success) {
-      // Step 5: Update docs
+      // Step 5: Update docs and PRD metadata
       const docsUpdated: string[] = [];
       if (updateTodoDoc(exec.projectRoot, exec.branch, exec.description)) {
         docsUpdated.push("docs/TODO.md");
@@ -184,6 +250,13 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         )
       ) {
         docsUpdated.push("docs/PROJECT-STATUS.md");
+      }
+      // Update PRD file with completion metadata
+      if (exec.prdPath && mergeResult.commitHash) {
+        if (updatePrdMetadata(exec.prdPath, exec.branch, mergeResult.commitHash)) {
+          docsUpdated.push(exec.prdPath);
+        }
+        updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, mergeResult.commitHash);
       }
 
       // Commit doc updates if any
@@ -208,8 +281,30 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         }
       }
 
-      // Update status
-      await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+      // Step 7: Delete branch after successful merge
+      try {
+        execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+        console.log(`>>> Deleted branch ${exec.branch}`);
+      } catch (e) {
+        console.error(`Failed to delete branch ${exec.branch}:`, e);
+      }
+
+      // Update status to merged and record merge info
+      await updateExecution(exec.id, {
+        status: "merged",
+        mergedAt: new Date(),
+        mergeCommitSha: mergeResult.commitHash || null,
+        updatedAt: new Date(),
+      });
+
+      // Archive the execution (move to archived state)
+      await archiveExecution(exec.id);
+
+      // Check if all executions are complete
+      const completionInfo = await checkAllComplete(
+        { branch: exec.branch, description: exec.description },
+        mergeResult.commitHash || null
+      );
 
       return {
         success: true,
@@ -225,6 +320,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
         message: mergeResult.alreadyMerged
           ? `Branch ${input.branch} was already merged to main`
           : `Successfully merged ${input.branch} to main`,
+        ...completionInfo,
       };
     }
 
@@ -266,7 +362,36 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
                 }
               }
 
-              await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+              // Delete branch after successful merge
+              try {
+                execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+                console.log(`>>> Deleted branch ${exec.branch}`);
+              } catch (e) {
+                console.error(`Failed to delete branch ${exec.branch}:`, e);
+              }
+
+              // Update PRD metadata
+              if (exec.prdPath) {
+                updatePrdMetadata(exec.prdPath, exec.branch, commitHash);
+                updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
+              }
+
+              // Update status to merged and record merge info
+              await updateExecution(exec.id, {
+                status: "merged",
+                mergedAt: new Date(),
+                mergeCommitSha: commitHash,
+                updatedAt: new Date(),
+              });
+
+              // Archive the execution
+              await archiveExecution(exec.id);
+
+              // Check if all executions are complete
+              const completionInfo = await checkAllComplete(
+                { branch: exec.branch, description: exec.description },
+                commitHash
+              );
 
               return {
                 success: true,
@@ -276,6 +401,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
                 conflictResolution: "auto",
                 mergedStories: completedStories.map((s) => s.id),
                 message: `Successfully merged ${input.branch} (schema conflict auto-resolved)`,
+                ...completionInfo,
               };
             } catch {
               // Fall through to agent resolution
@@ -323,7 +449,36 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
             encoding: "utf-8",
           }).trim();
 
-        await updateExecution(exec.id, { status: "completed", updatedAt: new Date() });
+          // Delete branch after successful merge
+          try {
+            execSync(`git branch -D ${exec.branch}`, { cwd: exec.projectRoot });
+            console.log(`>>> Deleted branch ${exec.branch}`);
+          } catch (e) {
+            console.error(`Failed to delete branch ${exec.branch}:`, e);
+          }
+
+          // Update PRD metadata
+          if (exec.prdPath) {
+            updatePrdMetadata(exec.prdPath, exec.branch, commitHash);
+            updatePrdIndex(exec.projectRoot, exec.prdPath, exec.branch, commitHash);
+          }
+
+          // Update status to merged and record merge info
+          await updateExecution(exec.id, {
+            status: "merged",
+            mergedAt: new Date(),
+            mergeCommitSha: commitHash,
+            updatedAt: new Date(),
+          });
+
+          // Archive the execution
+          await archiveExecution(exec.id);
+
+          // Check if all executions are complete
+          const completionInfo = await checkAllComplete(
+            { branch: exec.branch, description: exec.description },
+            commitHash
+          );
 
           return {
             success: true,
@@ -333,6 +488,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
             conflictResolution: "agent",
             mergedStories: completedStories.map((s) => s.id),
             message: `Merge conflicts resolved by agent for ${input.branch}`,
+            ...completionInfo,
           };
         } else {
           await abortMerge(exec.projectRoot);
@@ -587,11 +743,17 @@ export async function mergeQueueAction(
         current: exec.branch,
         message: result.message,
       };
+    } else {
+      // Execution was deleted/archived, remove from queue and try next
+      await deleteMergeQueueByExecutionId(next.executionId);
+
+      // Recursively process next item
+      return mergeQueueAction({ action: "process" });
     }
   }
 
   return {
     queue: queue.map((q) => q.executionId),
-    message: "Unknown action",
+    message: `Unknown action: ${input.action}`,
   };
 }

@@ -1,10 +1,9 @@
 import { z } from "zod";
-import { resolve, basename } from "path";
-import { randomUUID } from "crypto";
+import { resolve } from "path";
 import { execSync } from "child_process";
 import { parsePrdFile } from "../utils/prd-parser.js";
-import { createWorktree } from "../utils/worktree.js";
 import { generateAgentPrompt } from "../utils/agent.js";
+import { createExecutionFromPrd } from "../utils/execution.js";
 import {
   detectPackageManager,
   getInstallCommand,
@@ -12,11 +11,7 @@ import {
 } from "../utils/package-manager.js";
 import {
   areDependenciesSatisfied,
-  findExecutionByBranch,
-  insertExecution,
-  insertUserStories,
   updateExecution,
-  ExecutionRecord,
 } from "../store/state.js";
 
 export const batchStartInputSchema = z.object({
@@ -60,7 +55,7 @@ export interface BatchStartResult {
   skipped: Array<{ prdPath: string; reason: string }>;
   readyToStart: Array<{
     branch: string;
-    agentPrompt: string;
+    agentPrompt: string | null;
     dependencies: string[];
   }>;
   waitingForDependencies: Array<{
@@ -135,10 +130,13 @@ function preheatWorktree(worktreePath: string, installCmd: InstallCommand): void
 
 export async function batchStart(input: BatchStartInput): Promise<BatchStartResult> {
   const projectRoot = input.projectRoot || process.cwd();
-  const projectName = basename(projectRoot);
   const contextPath = input.contextInjectionPath
     ? resolve(projectRoot, input.contextInjectionPath)
     : undefined;
+
+  // If the Runner is enabled (default), we intentionally do NOT return agent prompts.
+  // This prevents manual starts that bypass the Runner's concurrency control.
+  const manualStartMode = process.env.RALPH_AUTO_RUNNER === "false";
 
   // Detect package manager
   const pm = detectPackageManager(projectRoot);
@@ -154,82 +152,24 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
 
     try {
       const prd = parsePrdFile(fullPath);
-
-      // Check if execution already exists
-      const existing = await findExecutionByBranch(prd.branchName);
-      if (existing) {
-        skipped.push({
-          prdPath,
-          reason: `Execution already exists for branch ${prd.branchName}`,
-        });
-        continue;
-      }
-
-      // Create worktree if requested
-      let worktreePath: string | null = null;
-      if (input.worktree) {
-        worktreePath = await createWorktree(projectRoot, prd.branchName);
-      }
-
-      // Create execution record
-      const executionId = randomUUID();
-      const now = new Date();
-
-      await insertExecution({
-        id: executionId,
-        project: projectName,
-        branch: prd.branchName,
-        description: prd.description,
+      const created = await createExecutionFromPrd({
+        projectRoot,
         prdPath: fullPath,
-        projectRoot: projectRoot,
-        worktreePath: worktreePath,
-        status: "pending",
-        agentTaskId: null,
+        prd,
+        worktree: input.worktree,
         onConflict: input.onConflict,
         autoMerge: input.autoMerge,
         notifyOnComplete: input.notifyOnComplete,
-        dependencies: prd.dependencies,
-        // Stagnation detection fields
-        loopCount: 0,
-        consecutiveNoProgress: 0,
-        consecutiveErrors: 0,
-        lastError: null,
-        lastFilesChanged: 0,
-        createdAt: now,
-        updatedAt: now,
+        status: "pending",
       });
-
-      // Create user story records
-      const storyRecords = prd.userStories.map((story) => ({
-        id: `${executionId}:${story.id}`,
-        executionId: executionId,
-        storyId: story.id,
-        title: story.title,
-        description: story.description,
-        acceptanceCriteria: story.acceptanceCriteria,
-        priority: story.priority,
-        passes: false,
-        notes: "",
-      }));
-
-      if (storyRecords.length > 0) {
-        await insertUserStories(storyRecords);
-      }
 
       prdInfos.push({
         prdPath,
-        branch: prd.branchName,
+        branch: created.branch,
         dependencies: prd.dependencies,
-        worktreePath,
-        executionId,
-        stories: storyRecords.map((s) => ({
-          storyId: s.storyId,
-          title: s.title,
-          description: s.description,
-          acceptanceCriteria: s.acceptanceCriteria,
-          priority: s.priority,
-          passes: s.passes,
-        })),
+        worktreePath: created.worktreePath,
+        executionId: created.executionId,
+        stories: created.stories,
       });
     } catch (error) {
       skipped.push({
@@ -261,7 +201,7 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
   // Phase 4: Determine which PRDs can start immediately
   const readyToStart: Array<{
     branch: string;
-    agentPrompt: string;
+    agentPrompt: string | null;
     dependencies: string[];
   }> = [];
 
@@ -271,29 +211,42 @@ export async function batchStart(input: BatchStartInput): Promise<BatchStartResu
   }> = [];
 
   for (const prd of prdInfos) {
-    const tempExec = { dependencies: prd.dependencies } as ExecutionRecord;
-    const depStatus = await areDependenciesSatisfied(tempExec);
+    const depStatus = await areDependenciesSatisfied({
+      dependencies: prd.dependencies,
+      projectRoot,
+      prdPath: resolve(projectRoot, prd.prdPath),
+    });
 
     if (depStatus.satisfied) {
-      const agentPrompt = generateAgentPrompt(
-        prd.branch,
-        "", // description not stored in prdInfo
-        prd.worktreePath || projectRoot,
-        prd.stories,
-        contextPath
-      );
-
-      // Mark as running immediately since we're returning the prompt
-      await updateExecution(prd.executionId, {
-        status: "running",
-        updatedAt: new Date(),
-      });
-
       readyToStart.push({
         branch: prd.branch,
-        agentPrompt,
+        agentPrompt: null,
         dependencies: prd.dependencies,
       });
+
+      if (manualStartMode) {
+        const agentPrompt = generateAgentPrompt(
+          prd.branch,
+          "", // description not stored in prdInfo
+          prd.worktreePath || projectRoot,
+          prd.stories,
+          contextPath
+        );
+
+        // Mark as running immediately since we're returning the prompt (legacy behavior)
+        await updateExecution(prd.executionId, {
+          status: "running",
+          updatedAt: new Date(),
+        });
+
+        readyToStart[readyToStart.length - 1].agentPrompt = agentPrompt;
+      } else {
+        // Runner-managed mode: mark as ready and let the Runner claim and launch.
+        await updateExecution(prd.executionId, {
+          status: "ready",
+          updatedAt: new Date(),
+        });
+      }
     } else {
       waitingForDependencies.push({
         branch: prd.branch,

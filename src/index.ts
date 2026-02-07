@@ -5,6 +5,11 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { spawn, ChildProcess } from "child_process";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import { existsSync, unlinkSync } from "fs";
+import { homedir } from "os";
 
 import { start, startInputSchema } from "./tools/start.js";
 import { batchStart, batchStartInputSchema } from "./tools/batch-start.js";
@@ -17,6 +22,9 @@ import { setAgentId, setAgentIdInputSchema } from "./tools/set-agent-id.js";
 import { resetStagnationTool, resetStagnationInputSchema } from "./tools/reset-stagnation.js";
 import { retry, retryInputSchema } from "./tools/retry.js";
 import { doctor, doctorInputSchema } from "./tools/doctor.js";
+import { claimReady, claimReadyInputSchema } from "./tools/claim-ready.js";
+import { setConcurrency, setConcurrencyInputSchema } from "./tools/set-concurrency.js";
+import { shutdown, shutdownInputSchema, setShutdownCallback } from "./tools/shutdown.js";
 
 const server = new Server(
   {
@@ -37,7 +45,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_start",
         description:
-          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. Fails if dependencies are not satisfied unless ignoreDependencies is true.",
+          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. If dependencies are not satisfied, it fails by default, can queue with queueIfBlocked, or can force start with ignoreDependencies.",
         annotations: {
           title: "Start PRD Execution",
           readOnlyHint: false,
@@ -87,6 +95,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Skip dependency check and start even if dependencies are not satisfied (default: false)",
               default: false,
             },
+            queueIfBlocked: {
+              type: "boolean",
+              description:
+                "If dependencies are not satisfied, create a pending execution instead of failing (default: false)",
+              default: false,
+            },
           },
           required: ["prdPath"],
         },
@@ -111,7 +125,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             status: {
               type: "string",
-              enum: ["pending", "running", "completed", "failed", "stopped", "merging"],
+              enum: ["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"],
               description: "Filter by status",
             },
             reconcile: {
@@ -439,6 +453,82 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: "ralph_claim_ready",
+        description:
+          "Atomically claim a ready PRD for execution. Used by Ralph Runner to safely pick up PRDs without race conditions. Returns agent prompt if successful.",
+        annotations: {
+          title: "Claim Ready PRD",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            branch: {
+              type: "string",
+              description: "Branch name of the PRD to claim (e.g., ralph/task1-agent)",
+            },
+          },
+          required: ["branch"],
+        },
+      },
+      {
+        name: "ralph_set_concurrency",
+        description:
+          "Set maximum concurrent PRD executions at runtime. The Runner will apply the change on its next poll cycle.",
+        annotations: {
+          title: "Set Concurrency",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            maxConcurrent: {
+              type: "number",
+              description: "Maximum concurrent PRD executions (1-10)",
+              minimum: 1,
+              maximum: 10,
+            },
+            reason: {
+              type: "string",
+              description: "Optional reason for changing concurrency",
+            },
+          },
+          required: ["maxConcurrent"],
+        },
+      },
+      {
+        name: "ralph_shutdown",
+        description:
+          "Shutdown the Ralph MCP Server and Runner. Use this to manually stop the MCP when you want to restart it with new code.",
+        annotations: {
+          title: "Shutdown MCP",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            reason: {
+              type: "string",
+              description: "Optional reason for shutdown",
+            },
+            force: {
+              type: "boolean",
+              description: "Force shutdown even if PRDs are running (default: false)",
+              default: false,
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -487,6 +577,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "ralph_doctor":
         result = await doctor(doctorInputSchema.parse(args || {}));
         break;
+      case "ralph_claim_ready":
+        result = await claimReady(claimReadyInputSchema.parse(args));
+        break;
+      case "ralph_set_concurrency":
+        result = await setConcurrency(setConcurrencyInputSchema.parse(args));
+        break;
+      case "ralph_shutdown":
+        result = await shutdown(shutdownInputSchema.parse(args || {}));
+        break;
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -514,10 +613,123 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // Start server
+let runnerProcess: ChildProcess | null = null;
+let runnerHeartbeatTimer: NodeJS.Timeout | null = null;
+
+function startRunner(): void {
+  // Get the directory of the current module
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const runnerPath = join(__dirname, "runner-cli.js");
+
+  // Check if RALPH_AUTO_RUNNER is explicitly disabled
+  if (process.env.RALPH_AUTO_RUNNER === "false") {
+    console.error("Ralph Runner auto-start disabled (RALPH_AUTO_RUNNER=false)");
+    return;
+  }
+
+  try {
+    runnerProcess = spawn("node", [runnerPath], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      detached: false,
+      env: { ...process.env, RALPH_RUNNER_SPAWNED: "true" },
+    });
+
+    runnerHeartbeatTimer = setInterval(() => {
+      if (!runnerProcess) return;
+      if (!runnerProcess.connected) return;
+      try {
+        runnerProcess.send({ type: "ralph:heartbeat", ts: Date.now() });
+      } catch {
+        // Ignore - disconnect will be handled by the child watchdog.
+      }
+    }, 5000);
+    runnerHeartbeatTimer.unref();
+
+    runnerProcess.on("error", (err) => {
+      console.error("Failed to start Ralph Runner:", err.message);
+    });
+
+    runnerProcess.on("exit", (code) => {
+      if (code !== 0 && code !== null) {
+        console.error(`Ralph Runner exited with code ${code}`);
+      }
+      if (runnerHeartbeatTimer) {
+        clearInterval(runnerHeartbeatTimer);
+        runnerHeartbeatTimer = null;
+      }
+      runnerProcess = null;
+    });
+
+    console.error("Ralph Runner started automatically");
+  } catch (err) {
+    console.error("Failed to spawn Ralph Runner:", err);
+  }
+}
+
+function stopRunner(): void {
+  if (runnerProcess) {
+    if (runnerHeartbeatTimer) {
+      clearInterval(runnerHeartbeatTimer);
+      runnerHeartbeatTimer = null;
+    }
+    try {
+      if (runnerProcess.connected) {
+        runnerProcess.send({ type: "ralph:shutdown", reason: "MCP server exiting" });
+      }
+    } catch {
+      // Ignore
+    }
+    runnerProcess.kill();
+    runnerProcess = null;
+    console.error("Ralph Runner stopped");
+  }
+}
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Ralph MCP Server started");
+
+  // Auto-start Runner
+  startRunner();
+
+  // Set shutdown callback for the shutdown tool
+  setShutdownCallback((reason) => {
+    console.error(`Shutdown requested: ${reason}`);
+    stopRunner();
+    process.exit(0);
+  });
+
+  // Watch for shutdown signal file (from Monitor TUI)
+  const dataDir = process.env.RALPH_DATA_DIR?.replace("~", homedir()) || join(homedir(), ".ralph");
+  const signalPath = join(dataDir, "shutdown-signal");
+  let signalCheckTimer: NodeJS.Timeout | null = null;
+
+  signalCheckTimer = setInterval(() => {
+    if (existsSync(signalPath)) {
+      try {
+        unlinkSync(signalPath); // Remove the signal file
+        console.error("Shutdown signal detected from Monitor TUI");
+        stopRunner();
+        if (signalCheckTimer) clearInterval(signalCheckTimer);
+        process.exit(0);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+  }, 1000);
+  signalCheckTimer.unref(); // Don't prevent process exit
+
+  // Cleanup on exit
+  process.on("SIGINT", () => {
+    stopRunner();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    stopRunner();
+    process.exit(0);
+  });
 }
 
 main().catch((error) => {
