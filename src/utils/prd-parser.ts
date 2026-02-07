@@ -234,17 +234,30 @@ function parseUserStoryBody(
   const description = descMatch?.[0]?.trim() || "";
 
   // Extract acceptance criteria
+  // Stop at verification commands, notes, priority sections (with or without markdown bold markers)
   const acMatch = body.match(
-    /(?:Acceptance\s*Criteria|验收标准|AC)[:\s]*([\s\S]*?)(?=\n(?:Priority|优先级|Notes|备注)|$)/i
+    /(?:Acceptance\s*Criteria|验收标准|AC)[:\s]*([\s\S]*?)(?=\n\*+(?:验证命令|Verification|Commands?|Priority|优先级|Notes|备注)\**[:：]|$)/i
   );
   const acContent = acMatch?.[1] || body;
 
   const acceptanceCriteria: string[] = [];
-  const acPattern = /[-*]\s*(.+?)(?:\n|$)/g;
+  // Match list items: "- item" or "* item" (on the same line, not matching newlines in \s)
+  const acPattern = /^[-*][ \t]+(.+)$/gm;
   let acItem;
   while ((acItem = acPattern.exec(acContent)) !== null) {
     const criterion = acItem[1].trim();
-    if (criterion && !criterion.startsWith("As a")) {
+    // Filter out invalid AC items:
+    // - Empty or just "*"
+    // - Markdown bold markers like "**验证命令:**" or "*验证命令:**"
+    // - Section headers like "验证命令:", "Verification:", "Commands:"
+    // - User story format "As a..."
+    if (
+      criterion &&
+      criterion !== "*" &&
+      !criterion.match(/^\*+[^*]*\*+:?\s*$/) &&
+      !criterion.match(/^(?:验证命令|Verification|Commands?|Notes?|备注|优先级|Priority)[:：]/i) &&
+      !criterion.startsWith("As a")
+    ) {
       acceptanceCriteria.push(criterion);
     }
   }
