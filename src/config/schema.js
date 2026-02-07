@@ -136,6 +136,66 @@ exports.AgentConfigSchema = zod_1.z.object({
             .describe("Maximum loops per story"),
     })
         .default({}),
+    staleDetection: zod_1.z
+        .object({
+        enabled: zod_1.z
+            .boolean()
+            .default(true)
+            .describe("Enable multi-signal stale detection for long-running tasks"),
+        timeoutsMs: zod_1.z
+            .object({
+            implementing: zod_1.z
+                .number()
+                .default(30 * 60 * 1000)
+                .describe("Stale timeout for implementation work (default: 30m)"),
+            building: zod_1.z
+                .number()
+                .default(60 * 60 * 1000)
+                .describe("Stale timeout for builds (default: 60m)"),
+            testing: zod_1.z
+                .number()
+                .default(90 * 60 * 1000)
+                .describe("Stale timeout for tests (default: 90m)"),
+            verifying: zod_1.z
+                .number()
+                .default(90 * 60 * 1000)
+                .describe("Stale timeout for verification (default: 90m)"),
+            unknown: zod_1.z
+                .number()
+                .default(30 * 60 * 1000)
+                .describe("Fallback stale timeout when task type is unknown (default: 30m)"),
+        })
+            .default({}),
+        signals: zod_1.z
+            .object({
+            gitCommits: zod_1.z
+                .boolean()
+                .default(true)
+                .describe("Use git commit timestamps as an activity signal"),
+            fileChanges: zod_1.z
+                .boolean()
+                .default(true)
+                .describe("Use changed file mtimes as an activity signal"),
+            logMtime: zod_1.z
+                .boolean()
+                .default(true)
+                .describe("Use agent log file mtime as an activity signal"),
+            stateUpdatedAt: zod_1.z
+                .boolean()
+                .default(true)
+                .describe("Use execution.updatedAt as an activity signal"),
+        })
+            .default({}),
+        maxFilesToStat: zod_1.z
+            .number()
+            .default(200)
+            .describe("Max changed files to stat for mtime-based detection (default: 200)"),
+        logTailBytes: zod_1.z
+            .number()
+            .default(20000)
+            .describe("How many bytes of agent log to read for task inference (default: 20KB)"),
+    })
+        .default({}),
 });
 // =============================================================================
 // NOTIFICATION CONFIGURATION

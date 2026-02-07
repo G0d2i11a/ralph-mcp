@@ -161,7 +161,7 @@ export class MonitorUI {
   private setupKeyBindings() {
     this.screen.key(['C-c'], () => process.exit(0));
 
-    this.screen.key(['q'], () => {
+    this.screen.key(['q', 'Q'], () => {
       if (this.viewMode === 'history') {
         this.showMainView();
         return;
@@ -175,21 +175,21 @@ export class MonitorUI {
       }
     });
 
-    this.screen.key(['h', 'a'], () => {
+    this.screen.key(['h', 'H', 'a', 'A'], () => {
       if (this.viewMode === 'main') {
         this.showHistoryView();
       }
     });
 
-    this.screen.key(['r'], () => {
+    this.screen.key(['r', 'R'], () => {
       this.refresh();
     });
 
-    this.screen.key(['S'], () => {
+    this.screen.key(['s', 'S'], () => {
       this.shutdownMcp();
     });
 
-    this.screen.key(['t'], () => {
+    this.screen.key(['t', 'T'], () => {
       this.retrySelected();
     });
 
