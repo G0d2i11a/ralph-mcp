@@ -4,6 +4,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { RalphState, RalphExecution } from './types';
 import { StateLoader } from './state-loader';
+import { evaluateExecutionStaleness, type StaleDetectionConfig } from '../../src/utils/stale-detection.js';
+import { loadConfig } from '../../src/config/loader.js';
 
 type DisplayStatus = 'RUN' | 'MRG' | 'WAIT' | 'ERR' | 'OK';
 type ViewMode = 'main' | 'history';
@@ -46,6 +48,8 @@ export class MonitorUI {
   private mainSelection: ListSelection = { key: null, occurrence: 0, index: 0 };
   private historySelection: ListSelection = { key: null, occurrence: 0, index: 0 };
   private historyEntries: ArchivedHistoryEntry[] = [];
+  private staleConfigCache: Map<string, StaleDetectionConfig> = new Map();
+  private activityCache: Map<string, { activity: string; timestamp: number }> = new Map();
 
   constructor(stateLoader: StateLoader) {
     this.stateLoader = stateLoader;
@@ -1255,25 +1259,142 @@ export class MonitorUI {
   }
 
   /**
-   * Get activity status based on log file mtime.
+   * Get activity status (synchronous, uses cached result).
    * Returns colored status indicator.
    */
   private getLogActivity(exec: RalphExecution): string | undefined {
+    const branch = exec.branch;
+    const cached = this.activityCache.get(branch);
+
+    // Return cached result if fresh (< 2 seconds old)
+    if (cached && Date.now() - cached.timestamp < 2000) {
+      return cached.activity;
+    }
+
+    // Trigger async update in background (don't await)
+    this.updateActivityCache(exec).catch(() => {
+      // Silently ignore errors
+    });
+
+    // Return cached result or fallback
+    return cached?.activity;
+  }
+
+  /**
+   * Update activity cache using multi-signal stale detection.
+   */
+  private async updateActivityCache(exec: RalphExecution): Promise<void> {
+    const branch = exec.branch;
+    const projectRoot = (exec as any).projectRoot;
+    const worktreePath = (exec as any).worktreePath;
     const logPath = (exec as any).logPath;
-    if (!logPath) return undefined;
+
+    if (!projectRoot || !logPath) return;
 
     try {
-      const stat = statSync(logPath);
-      const mtime = stat.mtimeMs;
-      const age = Date.now() - mtime;
+      // Get or load stale detection config
+      const config = await this.getStaleConfig(projectRoot);
 
-      if (age < 5000) return '{green-fg}active{/green-fg}';
-      if (age < 30000) return `{yellow-fg}${Math.floor(age / 1000)}s{/yellow-fg}`;
-      if (age < 120000) return `{red-fg}${Math.floor(age / 1000)}s{/red-fg}`;
-      if (age < 300000) return `{red-fg}${Math.floor(age / 60000)}m{/red-fg}`;
-      return '{red-fg}stale{/red-fg}';
+      // Prepare execution-like object for stale detection
+      const execLike = {
+        updatedAt: new Date((exec as any).updatedAt || Date.now()),
+        currentStep: (exec as any).currentStep || null,
+        lastError: (exec as any).lastError || null,
+        projectRoot,
+        worktreePath: worktreePath || null,
+        logPath,
+      };
+
+      // Evaluate staleness using multi-signal detection
+      const decision = await evaluateExecutionStaleness(execLike, config);
+
+      // Format display based on decision
+      const idleMs = decision.idleMs;
+      let activity: string;
+
+      if (decision.isStale) {
+        activity = '{red-fg}stale{/red-fg}';
+      } else if (idleMs < 5000) {
+        activity = '{green-fg}active{/green-fg}';
+      } else if (idleMs < 30000) {
+        activity = `{yellow-fg}${Math.floor(idleMs / 1000)}s{/yellow-fg}`;
+      } else if (idleMs < 120000) {
+        activity = `{red-fg}${Math.floor(idleMs / 1000)}s{/red-fg}`;
+      } else if (idleMs < 300000) {
+        activity = `{red-fg}${Math.floor(idleMs / 60000)}m{/red-fg}`;
+      } else {
+        // Show task type and timeout for long-running tasks
+        const timeoutMin = Math.floor(decision.timeoutMs / 60000);
+        activity = `{yellow-fg}${Math.floor(idleMs / 60000)}m/${timeoutMin}m{/yellow-fg}`;
+      }
+
+      // Cache the result
+      this.activityCache.set(branch, { activity, timestamp: Date.now() });
     } catch {
-      return undefined;
+      // Fallback to simple log mtime check on error
+      try {
+        const stat = statSync(logPath);
+        const age = Date.now() - stat.mtimeMs;
+        let activity: string;
+
+        if (age < 5000) {
+          activity = '{green-fg}active{/green-fg}';
+        } else if (age < 30000) {
+          activity = `{yellow-fg}${Math.floor(age / 1000)}s{/yellow-fg}`;
+        } else {
+          activity = `{red-fg}${Math.floor(age / 60000)}m{/red-fg}`;
+        }
+
+        this.activityCache.set(branch, { activity, timestamp: Date.now() });
+      } catch {
+        // Ignore errors
+      }
+    }
+  }
+
+  /**
+   * Get stale detection config for a project (cached).
+   */
+  private async getStaleConfig(projectRoot: string): Promise<StaleDetectionConfig> {
+    const cached = this.staleConfigCache.get(projectRoot);
+    if (cached) return cached;
+
+    try {
+      const loaded = await loadConfig(projectRoot);
+      const stale = loaded.config.agent.staleDetection;
+
+      const resolved: StaleDetectionConfig = {
+        enabled: stale.enabled,
+        timeoutsMs: stale.timeoutsMs,
+        signals: stale.signals,
+        maxFilesToStat: stale.maxFilesToStat,
+        logTailBytes: stale.logTailBytes,
+      };
+
+      this.staleConfigCache.set(projectRoot, resolved);
+      return resolved;
+    } catch {
+      // Return default config on error
+      const defaultConfig: StaleDetectionConfig = {
+        enabled: true,
+        timeoutsMs: {
+          implementing: 30 * 60 * 1000,
+          building: 60 * 60 * 1000,
+          testing: 90 * 60 * 1000,
+          verifying: 90 * 60 * 1000,
+          unknown: 30 * 60 * 1000,
+        },
+        signals: {
+          gitCommits: true,
+          fileChanges: true,
+          logMtime: true,
+          stateUpdatedAt: true,
+        },
+        maxFilesToStat: 200,
+        logTailBytes: 20000,
+      };
+      this.staleConfigCache.set(projectRoot, defaultConfig);
+      return defaultConfig;
     }
   }
 
