@@ -346,7 +346,15 @@ async function main(): Promise<void> {
 
   // Create launcher based on provider
   const launcher = agentProvider === "codex"
-    ? createCodexLauncher({ onLog: log })
+    ? createCodexLauncher({
+        onLog: log,
+        codexPath: loadedConfig.config.agent?.codex?.codexPath,
+        approvalPolicy: loadedConfig.config.agent?.codex?.approvalPolicy,
+        sandboxMode: loadedConfig.config.agent?.codex?.sandboxMode,
+        level: loadedConfig.config.agent?.codex?.level,
+        maxRecoveryAttempts: loadedConfig.config.agent?.codex?.maxRecoveryAttempts,
+        stallTimeoutMinutes: loadedConfig.config.agent?.codex?.stallTimeoutMinutes,
+      })
     : new ClaudeLauncher({ onLog: log });
 
   log("info", `  Agent provider: ${agentProvider}`);

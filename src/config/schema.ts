@@ -142,7 +142,7 @@ export const AgentConfigSchema = z.object({
   provider: z
     .enum(["claude", "codex"])
     .default("claude")
-    .describe("Agent provider: 'claude' for Claude API, 'codex' for Codex MCP"),
+    .describe("Agent provider: 'claude' for Claude CLI, 'codex' for Codex CLI"),
   coAuthor: z
     .string()
     .default("Claude Opus 4.5 <noreply@anthropic.com>")
@@ -151,6 +151,35 @@ export const AgentConfigSchema = z.object({
     .string()
     .optional()
     .describe("Path to context file to inject into agent prompt"),
+  codex: z
+    .object({
+      codexPath: z
+        .string()
+        .default("codex")
+        .describe("Path to Codex CLI executable"),
+      approvalPolicy: z
+        .enum(["never", "on-request", "on-failure", "untrusted"])
+        .default("on-request")
+        .describe("Approval policy for command execution"),
+      sandboxMode: z
+        .enum(["read-only", "workspace-write", "danger-full-access"])
+        .default("workspace-write")
+        .describe("Sandbox mode for filesystem access"),
+      level: z
+        .enum(["L1", "L2", "L3", "L4"])
+        .default("L2")
+        .describe("Execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)"),
+      maxRecoveryAttempts: z
+        .number()
+        .default(2)
+        .describe("Max auto-recovery attempts when stalled"),
+      stallTimeoutMinutes: z
+        .number()
+        .default(5)
+        .describe("Minutes of inactivity before detecting stall"),
+    })
+    .default({})
+    .describe("Codex-specific configuration (only used when provider: codex)"),
   stagnation: z
     .object({
       noProgressThreshold: z

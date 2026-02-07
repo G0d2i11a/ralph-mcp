@@ -5,7 +5,7 @@
 agent:
   # Agent provider: "claude" (default) or "codex"
   # - claude: Uses Claude CLI for agent execution
-  # - codex: Uses Codex MCP server for agent execution (experimental)
+  # - codex: Uses Codex CLI for agent execution
   provider: claude
 
   # Co-author for git commits
@@ -13,6 +13,28 @@ agent:
 
   # Optional: Path to context file to inject into agent prompt
   # contextInjectionPath: "CLAUDE.md"
+
+  # Codex-specific settings (only used when provider: codex)
+  codex:
+    # Path to Codex CLI executable (default: "codex")
+    # codexPath: "codex"
+
+    # Approval policy for command execution
+    # Options: never, on-request, on-failure, untrusted
+    approvalPolicy: on-request
+
+    # Sandbox mode for filesystem access
+    # Options: read-only, workspace-write, danger-full-access
+    sandboxMode: workspace-write
+
+    # Execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)
+    level: L2
+
+    # Max auto-recovery attempts when stalled
+    maxRecoveryAttempts: 2
+
+    # Minutes of inactivity before detecting stall
+    stallTimeoutMinutes: 5
 
   # Stagnation detection
   stagnation:

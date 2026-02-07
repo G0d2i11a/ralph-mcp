@@ -1,10 +1,13 @@
+import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { mkdirSync, existsSync, writeFileSync } from "fs";
+import { openSync, closeSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import type { LaunchResult, AgentLauncher } from "../runner.js";
 import { RALPH_DATA_DIR } from "../store/state.js";
 
 export interface CodexLauncherConfig {
+  /** Path to Codex CLI executable (default: "codex") */
+  codexPath?: string;
   /** Callback for logging */
   onLog?: (level: "info" | "warn" | "error", message: string) => void;
   /** Approval policy for commands */
@@ -17,25 +20,33 @@ export interface CodexLauncherConfig {
   maxRecoveryAttempts?: number;
   /** Minutes of inactivity before detecting stall */
   stallTimeoutMinutes?: number;
+  /** Timeout for launch confirmation in ms (default: 30000) */
+  launchTimeout?: number;
 }
 
 /**
- * Codex MCP Agent Launcher
+ * Codex CLI Agent Launcher
  *
- * Launches Codex agents using the Codex MCP server.
- * This is a placeholder implementation that would need to integrate
- * with the actual MCP client to call mcp__subcodex__run.
+ * Launches Codex agents using the Codex CLI with:
+ * - `--non-interactive` flag for autonomous operation
+ * - `--approval-policy` for command execution control
+ * - `--sandbox-mode` for filesystem access control
+ *
+ * The launcher spawns the process detached so it continues running
+ * independently of the Runner process.
  */
 export class CodexLauncher implements AgentLauncher {
   private config: Required<Omit<CodexLauncherConfig, "onLog">> & Pick<CodexLauncherConfig, "onLog">;
 
   constructor(config: CodexLauncherConfig = {}) {
     this.config = {
+      codexPath: config.codexPath ?? "codex",
       approvalPolicy: config.approvalPolicy ?? "on-request",
       sandboxMode: config.sandboxMode ?? "workspace-write",
       level: config.level ?? "L2",
       maxRecoveryAttempts: config.maxRecoveryAttempts ?? 2,
       stallTimeoutMinutes: config.stallTimeoutMinutes ?? 5,
+      launchTimeout: config.launchTimeout ?? 30000,
       onLog: config.onLog,
     };
   }
@@ -69,33 +80,68 @@ export class CodexLauncher implements AgentLauncher {
     const logPath = join(logsDir, logFileName);
 
     try {
-      this.log("info", `Launching Codex agent in ${cwd}`);
-      this.log("info", `Task ID: ${agentTaskId}`);
+      // Build command arguments
+      const args = [
+        "--non-interactive",
+        "--approval-policy", this.config.approvalPolicy,
+        "--sandbox-mode", this.config.sandboxMode,
+        "--level", this.config.level,
+        "--max-recovery-attempts", String(this.config.maxRecoveryAttempts),
+        "--stall-timeout-minutes", String(this.config.stallTimeoutMinutes),
+        prompt,
+      ];
+
+      this.log("info", `Launching Codex CLI in ${cwd}`);
+      this.log("info", `Command: ${this.config.codexPath} ${args.join(" ")}`);
       this.log("info", `Log file: ${logPath}`);
 
-      // TODO: This is a placeholder implementation.
-      // In a real implementation, we would need to:
-      // 1. Get access to the MCP client
-      // 2. Call mcp__subcodex__run with the prompt
-      // 3. Monitor the Codex session for completion
-      // 4. Stream output to the log file
-      //
-      // For now, we'll return an error indicating this needs implementation.
+      // Open log file for writing
+      const logFd = openSync(logPath, "a");
 
-      this.log("error", "Codex launcher is not yet fully implemented");
-      this.log("error", "This requires integration with the MCP client to call mcp__subcodex__run");
+      // Spawn Codex process
+      const child = spawn(this.config.codexPath, args, {
+        cwd,
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        shell: false,
+      });
 
-      // Write a placeholder log entry
-      writeFileSync(logPath, JSON.stringify({
-        type: "error",
-        timestamp: new Date().toISOString(),
-        message: "Codex launcher not yet implemented",
-        agentTaskId,
-      }) + "\n");
+      // Wait for process to start
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error(`Codex launch timeout after ${this.config.launchTimeout}ms`));
+        }, this.config.launchTimeout);
+
+        child.on("spawn", () => {
+          clearTimeout(timeout);
+          this.log("info", `Codex process spawned with PID ${child.pid}`);
+          resolve();
+        });
+
+        child.on("error", (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+
+        // If process exits immediately, that's an error
+        child.on("exit", (code, signal) => {
+          clearTimeout(timeout);
+          if (code !== 0) {
+            reject(new Error(`Codex exited immediately with code ${code} signal ${signal}`));
+          }
+        });
+      });
+
+      // Detach the process so it continues running independently
+      child.unref();
+
+      // Close our reference to the log file
+      closeSync(logFd);
+
+      this.log("info", `Codex agent launched successfully: ${agentTaskId}`);
 
       return {
-        success: false,
-        error: "Codex launcher not yet implemented. This requires MCP client integration.",
+        success: true,
         agentTaskId,
         logPath,
       };
