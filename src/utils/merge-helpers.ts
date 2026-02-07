@@ -38,23 +38,35 @@ export async function syncMainToBranch(
   config?: RalphConfig
 ): Promise<SyncResult> {
   const mainBranch = config?.merge?.mainBranch || DEFAULT_CONFIG.merge.mainBranch;
-  const remote = config?.merge?.remote ?? DEFAULT_CONFIG.merge.remote;
+  // Use config.merge.remote if config is provided, otherwise use default
+  // Note: config.merge.remote can be null (to skip remote operations)
+  const remote = config?.merge ? config.merge.remote : DEFAULT_CONFIG.merge.remote;
+
+  console.log(`[syncMainToBranch] remote=${remote}, mainBranch=${mainBranch}`);
 
   try {
     // Check if remote exists (skip if remote is null)
     let hasRemote = false;
     if (remote) {
+      console.log(`[syncMainToBranch] Checking if remote '${remote}' exists...`);
       try {
         const { stdout } = await execAsync("git remote", { cwd: worktreePath });
         hasRemote = stdout.includes(remote);
+        console.log(`[syncMainToBranch] hasRemote=${hasRemote}`);
       } catch {
         hasRemote = false;
+        console.log(`[syncMainToBranch] Failed to check remote, hasRemote=false`);
       }
+    } else {
+      console.log(`[syncMainToBranch] remote is null, skipping fetch`);
     }
 
     // Fetch latest main only if remote exists
     if (hasRemote && remote) {
+      console.log(`[syncMainToBranch] Fetching ${remote}/${mainBranch}...`);
       await execAsync(`git fetch ${remote} ${mainBranch}`, { cwd: worktreePath });
+    } else {
+      console.log(`[syncMainToBranch] Skipping fetch (hasRemote=${hasRemote}, remote=${remote})`);
     }
 
     // Try to merge main into feature branch
@@ -269,7 +281,8 @@ export function generateCommitMessage(
     .map((s) => `- ${s.id}: ${s.title}`)
     .join("\n");
 
-  return `merge: ${branch} - ${description}
+  // Use 'chore' type and avoid 'merge' keyword to pass commitlint
+  return `chore: integrate ${branch} - ${description}
 
 Completed User Stories:
 ${storyList || "- No stories tracked"}

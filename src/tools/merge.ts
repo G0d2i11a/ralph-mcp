@@ -32,6 +32,8 @@ import {
   updateExecution,
   updateMergeQueueItem,
 } from "../store/state.js";
+import { getConfig } from "../config/loader.js";
+import { DEFAULT_CONFIG, type RalphConfig } from "../config/schema.js";
 
 export const mergeInputSchema = z.object({
   branch: z.string().describe("Branch name to merge (e.g., ralph/task1-agent)"),
@@ -130,6 +132,9 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     throw new Error(`No execution found for branch: ${input.branch}`);
   }
 
+  // Load config
+  const config = getConfig(exec.projectRoot);
+
   // Get completed stories for commit message
   const stories = await listUserStoriesByExecutionId(exec.id);
 
@@ -157,7 +162,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     // Step 1: Sync main to feature branch (in worktree)
     if (exec.worktreePath) {
       console.log(">>> Syncing main to feature branch...");
-      const syncResult = await syncMainToBranch(exec.worktreePath, exec.branch);
+      const syncResult = await syncMainToBranch(exec.worktreePath, exec.branch, config);
 
       if (!syncResult.success) {
         if (syncResult.hasConflicts && syncResult.conflictFiles) {
@@ -231,7 +236,8 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
       exec.worktreePath || undefined,
       exec.branch,
       commitMessage,
-      onConflict as "auto_theirs" | "auto_ours" | "notify" | "agent"
+      onConflict as "auto_theirs" | "auto_ours" | "notify" | "agent",
+      config
     );
 
     if (mergeResult.success) {
@@ -524,7 +530,8 @@ async function mergeBranchWithMessage(
   _worktreePath: string | undefined, // Unused, kept for API compatibility
   branch: string,
   commitMessage: string,
-  onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent"
+  onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent",
+  config?: RalphConfig
 ): Promise<{
   success: boolean;
   commitHash?: string;
@@ -539,20 +546,25 @@ async function mergeBranchWithMessage(
   // Always merge in projectRoot (main repo is already on main branch)
   const cwd = projectRoot;
 
-  // Check if origin remote exists
-  let hasOrigin = false;
-  try {
-    const { stdout } = await execPromise("git remote", { cwd });
-    hasOrigin = stdout.includes("origin");
-  } catch {
-    hasOrigin = false;
+  // Get remote from config (can be null to skip remote operations)
+  const remote = config?.merge ? config.merge.remote : DEFAULT_CONFIG.merge.remote;
+
+  // Check if remote exists (skip if remote is null)
+  let hasRemote = false;
+  if (remote) {
+    try {
+      const { stdout } = await execPromise("git remote", { cwd });
+      hasRemote = stdout.includes(remote);
+    } catch {
+      hasRemote = false;
+    }
   }
 
-  // Fetch latest main and pull
-  if (hasOrigin) {
+  // Fetch latest main and pull only if remote exists
+  if (hasRemote && remote) {
     try {
-      await execPromise("git fetch origin main", { cwd });
-      await execPromise("git pull origin main", { cwd });
+      await execPromise(`git fetch ${remote} main`, { cwd });
+      await execPromise(`git pull ${remote} main`, { cwd });
     } catch {
       // Ignore fetch/pull errors
     }
@@ -560,7 +572,7 @@ async function mergeBranchWithMessage(
 
   // Check if branch is already merged into main
   try {
-    const mergeBase = hasOrigin ? "origin/main" : "main";
+    const mergeBase = (hasRemote && remote) ? `${remote}/main` : "main";
     const { stdout: mergedBranches } = await execPromise(
       `git branch --merged ${mergeBase}`,
       { cwd }
@@ -593,30 +605,51 @@ async function mergeBranchWithMessage(
 
   try {
     // Perform merge (main repo is already on main branch, no checkout needed)
-    const escapedMessage = commitMessage.replace(/'/g, "'\\''");
-    const { stdout: mergeOutput } = await execPromise(
-      `git merge --no-ff ${mergeStrategy} "${branch}" -m '${escapedMessage}'`,
-      { cwd }
-    );
+    // Write commit message to a temp file to handle multiline messages
+    const { writeFileSync, unlinkSync } = await import("fs");
+    const { join } = await import("path");
+    const tmpFile = join(cwd, ".git", "MERGE_MSG_TMP");
+    writeFileSync(tmpFile, commitMessage, "utf-8");
 
-    const { stdout: hash } = await execPromise("git rev-parse HEAD", { cwd });
-    const commitHash = hash.trim();
+    try {
+      const { stdout: mergeOutput } = await execPromise(
+        `git merge --no-ff ${mergeStrategy} "${branch}" -F "${tmpFile}"`,
+        { cwd }
+      );
+      unlinkSync(tmpFile);
 
-    // Check if "Already up to date" (no new commit created)
-    const alreadyUpToDate = mergeOutput.includes("Already up to date");
+      const { stdout: hash } = await execPromise("git rev-parse HEAD", { cwd });
+      const commitHash = hash.trim();
 
-    // Push to origin if available
-    if (hasOrigin) {
-      await execPromise("git push origin main", { cwd });
+      // Check if "Already up to date" (no new commit created)
+      const alreadyUpToDate = mergeOutput.includes("Already up to date");
+
+      // Push to remote if available
+      if (hasRemote && remote) {
+        try {
+          await execPromise(`git push ${remote} main`, { cwd });
+        } catch {
+          // Ignore push errors (e.g., no remote configured)
+        }
+      }
+
+      return {
+        success: true,
+        commitHash,
+        hasConflicts: false,
+        alreadyMerged: alreadyUpToDate,
+      };
+    } catch (mergeError) {
+      // Clean up temp file
+      try {
+        unlinkSync(tmpFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+      throw mergeError;
     }
-
-    return {
-      success: true,
-      commitHash,
-      hasConflicts: false,
-      alreadyMerged: alreadyUpToDate,
-    };
-  } catch {
+  } catch (error) {
+    console.error("[mergeBranchWithMessage] Merge failed:", error);
     // Check for conflicts
     const { stdout: status } = await execPromise("git status --porcelain", { cwd });
 
@@ -633,7 +666,7 @@ async function mergeBranchWithMessage(
       };
     }
 
-    throw new Error("Merge failed for unknown reason");
+    throw new Error(`Merge failed for unknown reason: ${error}`);
   }
 }
 
