@@ -4,14 +4,15 @@
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
-    "rootDir": "../",
+    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "allowJs": true
   },
-  "include": ["src/**/*", "../src/utils/stale-detection.ts", "../src/config/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

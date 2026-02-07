@@ -4,8 +4,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { RalphState, RalphExecution } from './types';
 import { StateLoader } from './state-loader';
-import { evaluateExecutionStaleness, type StaleDetectionConfig } from '../../src/utils/stale-detection.js';
-import { loadConfig } from '../../src/config/loader.js';
+import { evaluateExecutionStaleness, type StaleDetectionConfig } from '../../dist/utils/stale-detection.js';
+import { loadConfig } from '../../dist/config/loader.js';
 
 type DisplayStatus = 'RUN' | 'MRG' | 'WAIT' | 'ERR' | 'OK';
 type ViewMode = 'main' | 'history';
