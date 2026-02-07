@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { Runner } from "./runner.js";
 import { ClaudeLauncher } from "./utils/launcher.js";
+import { createCodexLauncher } from "./utils/codex-launcher.js";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import net, { type Server as NetServer } from "net";
 import { getRunnerConfig, RALPH_DATA_DIR } from "./store/state.js";
+import { loadConfig } from "./config/loader.js";
 
 const RUNNER_PID_FILE = join(RALPH_DATA_DIR, "runner.pid");
 
@@ -338,10 +340,17 @@ async function main(): Promise<void> {
   log("info", `  Launch timeout: ${options.timeout}ms`);
   console.log("");
 
-  // Create launcher
-  const launcher = new ClaudeLauncher({
-    onLog: log,
-  });
+  // Load config to determine agent provider
+  const loadedConfig = await loadConfig(process.cwd());
+  const agentProvider = loadedConfig.config.agent?.provider ?? "claude";
+
+  // Create launcher based on provider
+  const launcher = agentProvider === "codex"
+    ? createCodexLauncher({ onLog: log })
+    : new ClaudeLauncher({ onLog: log });
+
+  log("info", `  Agent provider: ${agentProvider}`);
+  console.log("");
 
   // Create runner
   const runner = new Runner(

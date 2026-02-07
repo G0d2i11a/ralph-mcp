@@ -1,0 +1,87 @@
+# Ralph Configuration Example
+# Copy this to .ralph.yaml or .ralph.local.yaml to customize
+
+# Agent configuration
+agent:
+  # Agent provider: "claude" (default) or "codex"
+  # - claude: Uses Claude CLI for agent execution
+  # - codex: Uses Codex MCP server for agent execution (experimental)
+  provider: claude
+
+  # Co-author for git commits
+  coAuthor: "Claude Opus 4.6 <noreply@anthropic.com>"
+
+  # Optional: Path to context file to inject into agent prompt
+  # contextInjectionPath: "CLAUDE.md"
+
+  # Stagnation detection
+  stagnation:
+    noProgressThreshold: 3      # Loops with no file changes before stagnation
+    sameErrorThreshold: 5       # Repeated errors before stagnation
+    maxLoopsPerStory: 10        # Maximum loops per story
+
+  # Stale detection (multi-signal activity monitoring)
+  staleDetection:
+    enabled: true
+    timeoutsMs:
+      implementing: 1800000     # 30 minutes for implementation work
+      building: 3600000         # 60 minutes for builds
+      testing: 5400000          # 90 minutes for tests
+      verifying: 5400000        # 90 minutes for verification
+      unknown: 1800000          # 30 minutes fallback
+    signals:
+      gitCommits: true          # Use git commit timestamps
+      fileChanges: true         # Use changed file mtimes
+      logMtime: true            # Use log file mtime
+      stateUpdatedAt: true      # Use state updatedAt field
+
+# Merge configuration
+merge:
+  # Git remote to fetch/push (set to null for local-only repos)
+  remote: origin
+
+  # Main branch name
+  mainBranch: main
+
+  # Auto-merge strategy
+  autoMerge: true
+
+  # Conflict resolution strategy
+  onConflict: agent  # Options: auto_theirs, auto_ours, notify, agent
+
+# Worktree configuration
+worktree:
+  enabled: true
+  baseDir: ".tmp/worktrees"
+  prefix: "ralph-"
+
+# Package manager
+packageManager:
+  type: auto  # Options: pnpm, npm, yarn, bun, cargo, go, pip, auto
+
+# Runner configuration
+runner:
+  maxConcurrency: 3             # Maximum concurrent PRD executions
+  autoRecovery: true            # Auto-retry interrupted executions
+  pollIntervalMs: 5000          # How often to check for new work
+
+# Storage configuration
+storage:
+  dataDir: "~/.ralph"
+  maxArchivedExecutions: 50
+
+# Quality gates (commands that must pass before merge)
+gates:
+  - id: type-check
+    name: Type Check
+    command: pnpm check-types
+    timeoutMs: 120000
+    required: true
+    when: pre-merge
+
+  - id: build
+    name: Build
+    command: pnpm build
+    timeoutMs: 180000
+    required: true
+    when: pre-merge

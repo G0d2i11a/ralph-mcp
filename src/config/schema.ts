@@ -139,6 +139,10 @@ export type ModeConfig = z.infer<typeof ModeConfigSchema>;
 // =============================================================================
 
 export const AgentConfigSchema = z.object({
+  provider: z
+    .enum(["claude", "codex"])
+    .default("claude")
+    .describe("Agent provider: 'claude' for Claude API, 'codex' for Codex MCP"),
   coAuthor: z
     .string()
     .default("Claude Opus 4.5 <noreply@anthropic.com>")
