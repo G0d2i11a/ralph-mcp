@@ -48,7 +48,7 @@ export function generateAgentPrompt(
         const acList = s.acceptanceCriteria.map((ac, idx) => {
           const acKey = `AC-${idx + 1}`;
           const evidence = acEvidence[acKey];
-          const status = evidence?.passes ? "âœ“" : "â—‹";
+          const status = evidence?.passes ? "âœ? : "â—?;
           return `- ${status} AC-${idx + 1}: ${ac}${evidence?.passes ? ` (completed)` : ""}`;
         }).join("\n");
 
@@ -137,9 +137,9 @@ Before implementing, verify the story is small enough to complete in ONE context
 - Add a filter dropdown to a list
 
 **Too big (should have been split):**
-- "Build the entire dashboard" â†’ schema, queries, UI components, filters
-- "Add authentication" â†’ schema, middleware, login UI, session handling
-- "Refactor the API" â†’ one story per endpoint
+- "Build the entire dashboard" â†?schema, queries, UI components, filters
+- "Add authentication" â†?schema, middleware, login UI, session handling
+- "Refactor the API" â†?one story per endpoint
 
 **If a story seems too big:** Complete what you can, commit it, then call \`ralph_update\` with \`passes: false\` and notes explaining what remains. Do NOT produce broken code trying to finish everything.
 
@@ -219,7 +219,7 @@ Before implementing, verify the story is small enough to complete in ONE context
      ...
    })
    \`\`\`
-10. Continue to the next story until all are complete.
+10. After completing this ONE story and calling ralph_update, STOP. End your response. Another iteration will pick up the next story.
 
 ## Notes Format for ralph_update
 
@@ -243,11 +243,11 @@ Provide structured learnings in the \`notes\` field:
   - Declare expectedFiles BEFORE implementation (step 3)
   - New files/directories must be declared or explained
   - Changes outside declaration trigger scope guardrail check
-  - >50% divergence between declared and actual â†’ requires re-evaluation
+  - >50% divergence between declared and actual â†?requires re-evaluation
   - unexpectedFileExplanation format: \`[{ file: "path", reason: "why", isNewFile: true/false }]\`
 - **SCOPE GUARDRAILS (prevents large changes):**
-  - Warn threshold: >1500 lines or >15 files â†’ must provide scopeExplanation
-  - Hard threshold: >3000 lines or >25 files â†’ story rejected, must split
+  - Warn threshold: >1500 lines or >15 files â†?must provide scopeExplanation
+  - Hard threshold: >3000 lines or >25 files â†?story rejected, must split
   - scopeExplanation format: \`[{ file: "path/to/file.ts", reason: "why in scope", lines: 123 }]\`
   - Excluded from count: lock files, snapshots, dist/, build/, .next/
 - ALL commits must pass typecheck and build - broken code compounds across iterations
@@ -262,7 +262,7 @@ Provide structured learnings in the \`notes\` field:
 - It's OK to mark a story as \`passes: false\` with notes explaining the blocker
 
 ## Stop Condition
-When all stories are complete, report completion.
+After completing ONE user story and calling ralph_update, end your response.\nAnother iteration will start a fresh agent for the next story.\nIf ALL stories are complete after your ralph_update, report completion.
 `;
 }
 
