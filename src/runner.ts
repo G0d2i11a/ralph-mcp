@@ -273,10 +273,21 @@ export class Runner {
    */
   async promotePendingPrds(): Promise<void> {
     const executions = await listExecutions();
-    const pending = executions.filter((e) => e.status === "pending" && Array.isArray(e.dependencies) && e.dependencies.length > 0);
+    const pending = executions.filter((e) => e.status === "pending");
 
     for (const exec of pending) {
       try {
+        // If no dependencies, promote immediately
+        if (!Array.isArray(exec.dependencies) || exec.dependencies.length === 0) {
+          await updateExecution(exec.id, {
+            status: "ready",
+            updatedAt: new Date(),
+          });
+          this.log("info", `Promoted ${exec.branch} from pending -> ready (no deps)`);
+          continue;
+        }
+
+        // Check if dependencies are satisfied
         const depStatus = await areDependenciesSatisfied({
           dependencies: exec.dependencies,
           projectRoot: exec.projectRoot,

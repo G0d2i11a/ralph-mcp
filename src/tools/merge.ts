@@ -198,7 +198,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     }
 
     // Step 2: Run quality checks (unless skipped)
-    if (!input.skipQualityChecks && exec.worktreePath) {
+    if (!input.skipQualityChecks && !input.force && exec.worktreePath) {
       console.log(">>> Running quality checks...");
       const qualityResult = await runQualityChecks(exec.worktreePath);
 
@@ -237,7 +237,8 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
       exec.branch,
       commitMessage,
       onConflict as "auto_theirs" | "auto_ours" | "notify" | "agent",
-      config
+      config,
+      input.force
     );
 
     if (mergeResult.success) {
@@ -531,7 +532,8 @@ async function mergeBranchWithMessage(
   branch: string,
   commitMessage: string,
   onConflict: "auto_theirs" | "auto_ours" | "notify" | "agent",
-  config?: RalphConfig
+  config?: RalphConfig,
+  noVerify?: boolean
 ): Promise<{
   success: boolean;
   commitHash?: string;
@@ -613,7 +615,7 @@ async function mergeBranchWithMessage(
 
     try {
       const { stdout: mergeOutput } = await execPromise(
-        `git merge --no-ff ${mergeStrategy} "${branch}" -F "${tmpFile}"`,
+        `git merge --no-ff ${noVerify ? "--no-verify " : ""}${mergeStrategy} "${branch}" -F "${tmpFile}"`,
         { cwd }
       );
       unlinkSync(tmpFile);

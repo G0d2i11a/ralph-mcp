@@ -191,6 +191,20 @@ interface RunnerConfigFileV1 {
   reason?: string;
 }
 
+export interface McpClientRecord {
+  id: string;
+  pid: number;
+  startedAt: Date;
+  lastHeartbeatAt: Date;
+}
+
+interface McpClientFileV1 {
+  id: string;
+  pid: number;
+  startedAt: string;
+  lastHeartbeatAt: string;
+}
+
 interface StateFileV1 {
   version: 1;
   executions: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt" | "lastProgressAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null; lastProgressAt: string | null }>;
@@ -200,6 +214,7 @@ interface StateFileV1 {
   archivedExecutions?: Array<Omit<ExecutionRecord, "createdAt" | "updatedAt" | "launchAttemptAt" | "mergedAt" | "stepStartedAt" | "lastProgressAt"> & { createdAt: string; updatedAt: string; launchAttemptAt: string | null; mergedAt: string | null; stepStartedAt: string | null; lastProgressAt: string | null }>;
   archivedUserStories?: UserStoryRecord[];
   runnerConfig?: RunnerConfigFileV1;
+  mcpClients?: McpClientFileV1[];
 }
 
 interface StateRuntime {
@@ -210,6 +225,7 @@ interface StateRuntime {
   archivedExecutions: ExecutionRecord[];
   archivedUserStories: UserStoryRecord[];
   runnerConfig: RunnerConfigRecord | null;
+  mcpClients: McpClientRecord[];
 }
 
 function parseDate(value: string, fieldName: string): Date {
@@ -237,6 +253,7 @@ function defaultState(): StateRuntime {
     archivedExecutions: [],
     archivedUserStories: [],
     runnerConfig: null,
+    mcpClients: [],
   };
 }
 
@@ -260,6 +277,7 @@ function normalizeState(raw: unknown): StateFileV1 {
   if (Array.isArray(obj.archivedExecutions)) base.archivedExecutions = obj.archivedExecutions as StateFileV1["archivedExecutions"];
   if (Array.isArray(obj.archivedUserStories)) base.archivedUserStories = obj.archivedUserStories as StateFileV1["archivedUserStories"];
   if (typeof obj.runnerConfig === "object" && obj.runnerConfig !== null) base.runnerConfig = obj.runnerConfig as StateFileV1["runnerConfig"];
+  if (Array.isArray(obj.mcpClients)) base.mcpClients = obj.mcpClients as McpClientFileV1[];
   return base;
 }
 
@@ -338,6 +356,11 @@ function deserializeState(file: StateFileV1): StateRuntime {
     archivedExecutions: (file.archivedExecutions || []).map(deserializeExecution),
     archivedUserStories: (file.archivedUserStories || []).map(deserializeUserStory),
     runnerConfig: deserializeRunnerConfig(file.runnerConfig),
+    mcpClients: (file.mcpClients || []).map((c) => ({
+      ...c,
+      startedAt: parseDate(c.startedAt, "mcpClients.startedAt"),
+      lastHeartbeatAt: parseDate(c.lastHeartbeatAt, "mcpClients.lastHeartbeatAt"),
+    })),
   };
 }
 
@@ -369,6 +392,12 @@ function serializeState(state: StateRuntime): StateFileV1 {
           reason: state.runnerConfig.reason || undefined,
         }
       : undefined,
+    mcpClients: state.mcpClients.map((c) => ({
+      id: c.id,
+      pid: c.pid,
+      startedAt: toIso(c.startedAt),
+      lastHeartbeatAt: toIso(c.lastHeartbeatAt),
+    })),
   };
 }
 
@@ -1379,5 +1408,42 @@ export async function restoreArchivedExecutionByBranch(branch: string): Promise<
     s.executions.push(restored);
 
     return restored;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// MCP Client Registry
+// ---------------------------------------------------------------------------
+
+export async function registerMcpClient(id: string, pid: number): Promise<void> {
+  await mutateState((s) => {
+    // Remove any existing record with the same id (re-register)
+    s.mcpClients = s.mcpClients.filter((c) => c.id !== id);
+    const now = new Date();
+    s.mcpClients.push({ id, pid, startedAt: now, lastHeartbeatAt: now });
+  });
+}
+
+export async function heartbeatMcpClient(id: string): Promise<void> {
+  await mutateState((s) => {
+    const client = s.mcpClients.find((c) => c.id === id);
+    if (client) {
+      client.lastHeartbeatAt = new Date();
+    }
+  });
+}
+
+export async function unregisterMcpClient(id: string): Promise<void> {
+  await mutateState((s) => {
+    s.mcpClients = s.mcpClients.filter((c) => c.id !== id);
+  });
+}
+
+export async function listLiveMcpClients(staleThresholdMs: number = 30_000): Promise<McpClientRecord[]> {
+  return readState((state) => {
+    const now = Date.now();
+    return state.mcpClients.filter(
+      (c) => now - c.lastHeartbeatAt.getTime() < staleThresholdMs
+    );
   });
 }

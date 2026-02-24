@@ -5,11 +5,15 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { spawn, ChildProcess } from "child_process";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync, unlinkSync } from "fs";
 import { homedir } from "os";
+import { randomUUID } from "crypto";
+
+import { isRunnerAlive } from "./utils/runner-singleton.js";
+import { registerMcpClient, heartbeatMcpClient, unregisterMcpClient } from "./store/state.js";
 
 import { start, startInputSchema } from "./tools/start.js";
 import { batchStart, batchStartInputSchema } from "./tools/batch-start.js";
@@ -613,77 +617,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // Start server
-let runnerProcess: ChildProcess | null = null;
-let runnerHeartbeatTimer: NodeJS.Timeout | null = null;
+const mcpClientId = randomUUID();
+let clientHeartbeatTimer: NodeJS.Timeout | null = null;
 
-function startRunner(): void {
-  // Get the directory of the current module
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  const runnerPath = join(__dirname, "runner-cli.js");
-
+async function startRunner(): Promise<void> {
   // Check if RALPH_AUTO_RUNNER is explicitly disabled
   if (process.env.RALPH_AUTO_RUNNER === "false") {
     console.error("Ralph Runner auto-start disabled (RALPH_AUTO_RUNNER=false)");
     return;
   }
 
+  // 1. Register this MCP client
+  await registerMcpClient(mcpClientId, process.pid);
+
+  // 2. Start heartbeat timer (every 10s)
+  clientHeartbeatTimer = setInterval(() => {
+    heartbeatMcpClient(mcpClientId).catch(() => {});
+  }, 10_000);
+  clientHeartbeatTimer.unref();
+
+  // 3. Check if Runner is already alive
+  if (await isRunnerAlive()) {
+    console.error("Ralph Runner already running (singleton detected), skipping spawn");
+    return;
+  }
+
+  // 4. Spawn Runner as detached process
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const runnerPath = join(__dirname, "runner-cli.js");
+
   try {
-    runnerProcess = spawn("node", [runnerPath], {
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
-      detached: false,
+    const child = spawn("node", [runnerPath], {
+      stdio: "ignore",
+      detached: true,
       env: { ...process.env, RALPH_RUNNER_SPAWNED: "true" },
     });
-
-    runnerHeartbeatTimer = setInterval(() => {
-      if (!runnerProcess) return;
-      if (!runnerProcess.connected) return;
-      try {
-        runnerProcess.send({ type: "ralph:heartbeat", ts: Date.now() });
-      } catch {
-        // Ignore - disconnect will be handled by the child watchdog.
-      }
-    }, 5000);
-    runnerHeartbeatTimer.unref();
-
-    runnerProcess.on("error", (err) => {
-      console.error("Failed to start Ralph Runner:", err.message);
-    });
-
-    runnerProcess.on("exit", (code) => {
-      if (code !== 0 && code !== null) {
-        console.error(`Ralph Runner exited with code ${code}`);
-      }
-      if (runnerHeartbeatTimer) {
-        clearInterval(runnerHeartbeatTimer);
-        runnerHeartbeatTimer = null;
-      }
-      runnerProcess = null;
-    });
-
-    console.error("Ralph Runner started automatically");
+    child.unref();
+    console.error("Ralph Runner spawned as detached process");
   } catch (err) {
     console.error("Failed to spawn Ralph Runner:", err);
   }
 }
 
-function stopRunner(): void {
-  if (runnerProcess) {
-    if (runnerHeartbeatTimer) {
-      clearInterval(runnerHeartbeatTimer);
-      runnerHeartbeatTimer = null;
-    }
-    try {
-      if (runnerProcess.connected) {
-        runnerProcess.send({ type: "ralph:shutdown", reason: "MCP server exiting" });
-      }
-    } catch {
-      // Ignore
-    }
-    runnerProcess.kill();
-    runnerProcess = null;
-    console.error("Ralph Runner stopped");
+async function stopRunner(): Promise<void> {
+  // 1. Clear heartbeat timer
+  if (clientHeartbeatTimer) {
+    clearInterval(clientHeartbeatTimer);
+    clientHeartbeatTimer = null;
   }
+
+  // 2. Unregister this MCP client (Runner manages its own lifecycle)
+  try {
+    await unregisterMcpClient(mcpClientId);
+  } catch {
+    // Ignore - best effort
+  }
+
+  console.error("MCP client unregistered; Runner will self-exit when idle");
 }
 
 async function main() {
@@ -692,13 +683,12 @@ async function main() {
   console.error("Ralph MCP Server started");
 
   // Auto-start Runner
-  startRunner();
+  await startRunner();
 
   // Set shutdown callback for the shutdown tool
   setShutdownCallback((reason) => {
     console.error(`Shutdown requested: ${reason}`);
-    stopRunner();
-    process.exit(0);
+    stopRunner().finally(() => process.exit(0));
   });
 
   // Watch for shutdown signal file (from Monitor TUI)
@@ -709,26 +699,25 @@ async function main() {
   signalCheckTimer = setInterval(() => {
     if (existsSync(signalPath)) {
       try {
-        unlinkSync(signalPath); // Remove the signal file
+        unlinkSync(signalPath);
         console.error("Shutdown signal detected from Monitor TUI");
-        stopRunner();
-        if (signalCheckTimer) clearInterval(signalCheckTimer);
-        process.exit(0);
-      } catch (e) {
+        stopRunner().finally(() => {
+          if (signalCheckTimer) clearInterval(signalCheckTimer);
+          process.exit(0);
+        });
+      } catch {
         // Ignore cleanup errors
       }
     }
   }, 1000);
-  signalCheckTimer.unref(); // Don't prevent process exit
+  signalCheckTimer.unref();
 
   // Cleanup on exit
   process.on("SIGINT", () => {
-    stopRunner();
-    process.exit(0);
+    stopRunner().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
-    stopRunner();
-    process.exit(0);
+    stopRunner().finally(() => process.exit(0));
   });
 }
 

@@ -638,7 +638,7 @@ export class MonitorUI {
       this.statusBar.setContent(' Esc: back | ↑↓: navigate');
       return;
     }
-    this.statusBar.setContent(' q: quit | h: history | S: shutdown MCP | ↑↓: navigate | Enter: expand');
+    this.statusBar.setContent(' q: quit | h: history | s: shutdown MCP | ↑↓: navigate | Enter: expand');
   }
 
   private showHistoryView() {
@@ -817,8 +817,15 @@ export class MonitorUI {
       const branchName = this.stripRalphPrefix(selectedExec.branch);
       const statusIcon = this.getStatusIcon(selectedExec, state);
       const progressLabel = this.formatExecutionProgress(selectedExec, state);
-      const logActivity = this.getLogActivity(selectedExec);
-      const activityIndicator = logActivity ? ` [${logActivity}]` : '';
+      // Only show activity indicator for running/starting/merging executions
+      const status = ((selectedExec as any).status as string | undefined)?.toLowerCase();
+      let activityIndicator = '';
+      if (status === 'running' || status === 'starting' || status === 'merging') {
+        const logActivity = this.getLogActivity(selectedExec);
+        if (logActivity) {
+          activityIndicator = ` [${logActivity}]`;
+        }
+      }
 
       logs.push(`{bold}Selected: ${branchName}{/bold}`);
       logs.push(`Status: ${statusIcon} ${progressLabel}${activityIndicator}`);
@@ -1065,11 +1072,13 @@ export class MonitorUI {
 
     const stories = this.getExecutionStories(exec, state);
     if (stories.length === 0) {
-      if (rawStatus === 'running' || rawStatus === 'pending') return 'starting...';
+      if (rawStatus === 'running') return 'starting...';
+      if (rawStatus === 'pending' && (exec as any).agentTaskId) return 'starting...';
       return 'no stories';
     }
 
-    if (rawStatus === 'pending') return 'starting...';
+    // Only show "starting..." for pending if agent has been assigned
+    if (rawStatus === 'pending' && (exec as any).agentTaskId) return 'starting...';
 
     return undefined;
   }

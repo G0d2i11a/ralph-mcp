@@ -3,10 +3,10 @@ import { Runner } from "./runner.js";
 import { ClaudeLauncher } from "./utils/launcher.js";
 import { createCodexLauncher } from "./utils/codex-launcher.js";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
 import { join } from "path";
-import net, { type Server as NetServer } from "net";
-import { getRunnerConfig, RALPH_DATA_DIR } from "./store/state.js";
+import { homedir } from "os";
+import { getRunnerConfig, listLiveMcpClients, listExecutions, RALPH_DATA_DIR } from "./store/state.js";
+import { acquireRunnerSingleton, type SingletonHandle } from "./utils/runner-singleton.js";
 import { loadConfig } from "./config/loader.js";
 
 const RUNNER_PID_FILE = join(RALPH_DATA_DIR, "runner.pid");
@@ -34,133 +34,6 @@ interface CliOptions {
   concurrency: number;
   maxRetries: number;
   timeout: number;
-}
-
-type SingletonHandle = {
-  endpoint: string;
-  server: NetServer;
-  release: () => Promise<void>;
-};
-
-const RUNNER_SINGLETON_ENDPOINT =
-  process.platform === "win32"
-    ? "\\\\.\\pipe\\ralph-runner"
-    : join(tmpdir(), "ralph-runner.sock");
-
-function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
-  return value instanceof Error;
-}
-
-async function tryConnectSingleton(endpoint: string, timeoutMs: number = 250): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const socket = net.connect(endpoint);
-    let settled = false;
-
-    const finish = (result: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(result);
-    };
-
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function listenSingleton(endpoint: string): Promise<NetServer> {
-  return await new Promise<NetServer>((resolve, reject) => {
-    const server = net.createServer((socket) => {
-      // We only use the server as a "singleton guard". Close connections immediately.
-      socket.end();
-    });
-
-    server.once("error", reject);
-    server.listen(endpoint, () => {
-      server.off("error", reject);
-      resolve(server);
-    });
-  });
-}
-
-async function closeServer(server: NetServer): Promise<void> {
-  await new Promise<void>((resolve) => {
-    server.close(() => resolve());
-  });
-}
-
-async function acquireRunnerSingleton(): Promise<SingletonHandle | null> {
-  const endpoint = RUNNER_SINGLETON_ENDPOINT;
-
-  // 1) Try connect: if it succeeds, another Runner is active.
-  if (await tryConnectSingleton(endpoint)) {
-    return null;
-  }
-
-  // 2) Try to become the singleton by listening.
-  try {
-    const server = await listenSingleton(endpoint);
-    return {
-      endpoint,
-      server,
-      release: async () => {
-        try {
-          await closeServer(server);
-        } catch {
-          // Ignore
-        }
-
-        // On Unix, the domain socket file can remain after unclean shutdowns.
-        if (process.platform !== "win32") {
-          try {
-            if (existsSync(endpoint)) unlinkSync(endpoint);
-          } catch {
-            // Ignore
-          }
-        }
-      },
-    };
-  } catch (error) {
-    // Race: another instance may have started between connect() and listen().
-    if (isErrnoException(error) && error.code === "EADDRINUSE") {
-      if (await tryConnectSingleton(endpoint)) {
-        return null;
-      }
-
-      // Stale Unix socket file: remove and retry once.
-      if (process.platform !== "win32") {
-        try {
-          if (existsSync(endpoint)) unlinkSync(endpoint);
-        } catch {
-          // Ignore
-        }
-
-        const server = await listenSingleton(endpoint);
-        return {
-          endpoint,
-          server,
-          release: async () => {
-            try {
-              await closeServer(server);
-            } catch {
-              // Ignore
-            }
-            try {
-              if (existsSync(endpoint)) unlinkSync(endpoint);
-            } catch {
-              // Ignore
-            }
-          },
-        };
-      }
-
-      return null;
-    }
-
-    throw error;
-  }
 }
 
 function parseArgs(): CliOptions {
@@ -254,53 +127,58 @@ function log(level: "info" | "warn" | "error", message: string): void {
   console.log(`[${formatTimestamp()}] [${prefix}] ${message}`);
 }
 
-type ParentIpcMessage =
-  | { type: "ralph:heartbeat"; ts?: number }
-  | { type: "ralph:shutdown"; reason?: string }
-  | { type: string; [key: string]: unknown };
+function installIdleMonitor(
+  runner: Runner,
+  singleton: SingletonHandle,
+  onIdle: () => void
+): () => void {
+  const CHECK_INTERVAL_MS = 60_000;
+  const IDLE_COUNTDOWN_MS = 5 * 60_000;
+  let idleSince: number | null = null;
 
-function installParentWatchdog(onParentGone: (reason: string) => void): () => void {
-  const hasIpc = typeof process.send === "function";
-  if (!hasIpc) return () => {};
+  const timer = setInterval(async () => {
+    try {
+      // Check for shutdown signal file
+      const dataDir = process.env.RALPH_DATA_DIR?.replace("~", homedir()) || join(homedir(), ".ralph");
+      const signalPath = join(dataDir, "runner-shutdown-signal");
+      if (existsSync(signalPath)) {
+        try { unlinkSync(signalPath); } catch { /* ignore */ }
+        log("info", "Shutdown signal file detected; exiting...");
+        onIdle();
+        return;
+      }
 
-  let lastHeartbeatAt = Date.now();
-  const heartbeatTimeoutMs = 15000;
-  const checkIntervalMs = 5000;
+      const [clients, executions] = await Promise.all([
+        listLiveMcpClients(),
+        listExecutions(),
+      ]);
 
-  const onMessage = (message: ParentIpcMessage): void => {
-    if (!message || typeof message !== "object") return;
-    if (message.type === "ralph:heartbeat") {
-      lastHeartbeatAt = Date.now();
-      return;
+      const activeExecs = executions.filter(
+        (e) => e.status === "running" || e.status === "starting"
+      );
+
+      if (clients.length === 0 && activeExecs.length === 0) {
+        if (idleSince === null) {
+          idleSince = Date.now();
+          log("info", "No active MCP clients or executions; idle countdown started (5 min)");
+        } else if (Date.now() - idleSince >= IDLE_COUNTDOWN_MS) {
+          log("info", "Idle timeout reached; shutting down Runner...");
+          onIdle();
+          return;
+        }
+      } else {
+        if (idleSince !== null) {
+          log("info", "Activity detected; idle countdown reset");
+        }
+        idleSince = null;
+      }
+    } catch {
+      // Ignore errors in idle check
     }
-    if (message.type === "ralph:shutdown") {
-      onParentGone(message.reason ? `shutdown requested: ${message.reason}` : "shutdown requested");
-    }
-  };
-
-  const onDisconnect = (): void => {
-    onParentGone("IPC disconnected");
-  };
-
-  process.on("message", onMessage);
-  process.on("disconnect", onDisconnect);
-
-  const timer = setInterval(() => {
-    if (process.connected === false) {
-      onParentGone("IPC disconnected");
-      return;
-    }
-    if (Date.now() - lastHeartbeatAt > heartbeatTimeoutMs) {
-      onParentGone("heartbeat timeout");
-    }
-  }, checkIntervalMs);
+  }, CHECK_INTERVAL_MS);
   timer.unref();
 
-  return () => {
-    clearInterval(timer);
-    process.off("message", onMessage);
-    process.off("disconnect", onDisconnect);
-  };
+  return () => clearInterval(timer);
 }
 
 async function main(): Promise<void> {
@@ -380,7 +258,7 @@ async function main(): Promise<void> {
 
   // Handle graceful shutdown
   let shuttingDown = false;
-  let disposeParentWatchdog: () => void = () => {};
+  let disposeIdleMonitor: () => void = () => {};
 
   const shutdown = (): void => {
     if (shuttingDown) {
@@ -394,7 +272,7 @@ async function main(): Promise<void> {
 
     // Give some time for cleanup
     setTimeout(() => {
-      disposeParentWatchdog();
+      disposeIdleMonitor();
       removePidFile();
       Promise.resolve(singleton.release())
         .catch(() => {})
@@ -408,8 +286,8 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  disposeParentWatchdog = installParentWatchdog((reason) => {
-    log("warn", `Parent MCP process gone (${reason}); exiting...`);
+  // Install idle monitor instead of parent watchdog
+  disposeIdleMonitor = installIdleMonitor(runner, singleton, () => {
     shutdown();
   });
 

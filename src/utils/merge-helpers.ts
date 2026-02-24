@@ -64,7 +64,12 @@ export async function syncMainToBranch(
     // Fetch latest main only if remote exists
     if (hasRemote && remote) {
       console.log(`[syncMainToBranch] Fetching ${remote}/${mainBranch}...`);
-      await execAsync(`git fetch ${remote} ${mainBranch}`, { cwd: worktreePath });
+      try {
+        await execAsync(`git fetch ${remote} ${mainBranch}`, { cwd: worktreePath });
+      } catch (fetchError) {
+        console.log(`[syncMainToBranch] Fetch failed (remote unreachable), falling back to local main`);
+        hasRemote = false;
+      }
     } else {
       console.log(`[syncMainToBranch] Skipping fetch (hasRemote=${hasRemote}, remote=${remote})`);
     }

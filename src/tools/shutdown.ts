@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 
 export const shutdownInputSchema = z.object({
   reason: z.string().optional().describe("Optional reason for shutdown"),
@@ -20,6 +23,16 @@ export function setShutdownCallback(callback: (reason?: string) => void): void {
   shutdownCallback = callback;
 }
 
+function writeRunnerShutdownSignal(): void {
+  try {
+    const dataDir = process.env.RALPH_DATA_DIR?.replace("~", homedir()) || join(homedir(), ".ralph");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, "runner-shutdown-signal"), String(Date.now()), "utf-8");
+  } catch {
+    // Best effort
+  }
+}
+
 export async function shutdown(input: ShutdownInput): Promise<ShutdownResult> {
   // Import here to avoid circular dependency
   const { listExecutions } = await import("../store/state.js");
@@ -37,6 +50,9 @@ export async function shutdown(input: ShutdownInput): Promise<ShutdownResult> {
 
   const reason = input.reason || "Manual shutdown via ralph_shutdown";
 
+  // Write signal file so the detached Runner picks it up
+  writeRunnerShutdownSignal();
+
   if (shutdownCallback) {
     // Schedule shutdown after response is sent
     setTimeout(() => {
@@ -46,7 +62,7 @@ export async function shutdown(input: ShutdownInput): Promise<ShutdownResult> {
 
   return {
     success: true,
-    message: `Ralph MCP Server shutting down. Reason: ${reason}`,
+    message: `Ralph MCP Server and Runner shutting down. Reason: ${reason}`,
     runningPrds: running.length,
   };
 }
