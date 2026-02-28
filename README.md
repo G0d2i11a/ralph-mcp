@@ -35,6 +35,41 @@ Claude: ralph_start → Task Agent handles everything automatically
 | No visibility into progress | Real-time status tracking |
 | Blocked while waiting | **Keep chatting** while agents work |
 
+## Improvements Over Original Ralph
+
+Ralph MCP extends [snarktank/ralph](https://github.com/snarktank/ralph) with production-grade automation while preserving its core strengths.
+
+### What's New
+
+| Feature | Original Ralph | Ralph MCP |
+|---------|---------------|-----------|
+| **Agent Lifecycle** | One process per User Story | One long-lived agent per PRD |
+| **Execution Model** | Manual script invocation | Background Runner + MCP integration |
+| **Parallel PRDs** | Sequential only | 5+ PRDs simultaneously |
+| **Dependency Management** | Manual coordination | Auto-triggered when dependencies complete |
+| **Stagnation Detection** | None | Auto-detects stuck agents, marks as failed |
+| **Agent Memory** | None | Progress Log persists learnings across stories |
+| **Merge Coordination** | Manual | Serial merge queue with conflict resolution |
+| **Notifications** | None | Windows Toast on completion |
+| **Claude Code Integration** | Requires wrapper scripts | Native MCP tools (`ralph_start`, `ralph_status`, etc.) |
+
+### What's Preserved
+
+Ralph MCP keeps the battle-tested foundations:
+
+- **PRD-Driven Development** - Structured requirements with User Stories and Acceptance Criteria
+- **Iterative Execution** - One User Story at a time with quality gates
+- **Git Worktree Isolation** - Zero conflicts between parallel features
+- **Quality Gates** - Type check, lint, build before every commit
+- **Automatic Merge** - Hands-free integration when all stories pass
+
+### Key Architectural Changes
+
+1. **Long-Lived Agents**: One agent completes all User Stories in a PRD (not spawning new processes per story)
+2. **Runner Automation**: Background process manages execution lifecycle, no manual script running
+3. **MCP Native**: Direct integration with Claude Code via MCP protocol
+4. **State Persistence**: JSON-based state survives restarts and enables parallel execution tracking
+
 ## Features
 
 - **2-Step Workflow** - Just create PRD and run `ralph_start`, everything else is automatic
@@ -99,7 +134,7 @@ Add to `~/.claude/mcp.json`:
 
 ```json
 {
-  "mcpServers": {
+  "mcrvers": {
     "ralph": {
       "command": "npx",
       "args": ["ralph-mcp"]
@@ -127,9 +162,7 @@ Restart Claude Code to load.
 
 For the best experience, create a skill file that teaches Claude how to use Ralph.
 
-See **[SKILL-EXAMPLE.md](./SKILL-EXAMPLE.md)** for a complete, copy-paste ready skill configuration.
-
-### Quick Setup
+See **[SKILL-EXAMPLE.md](./SKILL-EXAMPLE.md)** for a complete, copy-paste ready skill configurationQuick Setup
 
 ```bash
 # 1. Create skill directory
@@ -167,7 +200,7 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 | `ralph_merge_queue` | Manage serial merge queue |
 | `ralph_set_agent_id` | Record Task agent ID |
 | `ralph_retry` | Retry a failed PRD execution |
-| `ralph_reset_stagnation` | Reset stagnation counters after manual intervention |
+| `ralph_reset_stagnation` | Reset stagnation counters after manual interion |
 
 ## Usage
 
@@ -248,7 +281,7 @@ ralph_merge({ branch: "ralph/prd-feature" })
 ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
 
 // Retry a failed execution
-ralph_retry({ branch: "ralph/prd-feature" })
+ralph_retry({ branch: "ralph/prd-feare" })
 
 // Reset stagnation counters (after manual fix)
 ralph_reset_stagnation({ branch: "ralph/prd-feature" })
@@ -320,7 +353,7 @@ Override data directory with `RALPH_DATA_DIR` environment variable.
 | `autoMerge` | `true` | Auto add to merge queue when all stories pass |
 | `notifyOnComplete` | `true` | Show Windows notification on completion |
 | `onConflict` | `"agent"` | Conflict resolution: `auto_theirs`, `auto_ours`, `notify`, `agent` |
-| `contextInjectionPath` | `undefined` | Optional path to file (e.g. CLAUDE.md) to inject into prompt |
+| `contextInjectionPath` | `undefined` | Optionalfile (e.g. CLAUDE.md) to inject into prompt |
 | `ignoreDependencies` | `false` | Skip dependency check and start even if dependencies are not satisfied |
 | `queueIfBlocked` | `false` | If dependencies are not satisfied, create a pending execution instead of failing |
 
@@ -348,7 +381,7 @@ Start multiple PRDs with dependency resolution and serial `pnpm install`.
 | `notifyOnComplete` | `true` | Show Windows notification on completion |
 | `onConflict` | `"agent"` | Conflict resolution strategy |
 | `contextInjectionPath` | `undefined` | Path to file (e.g. CLAUDE.md) to inject into prompt |
-| `preheat` | `true` | Run pnpm install serially before starting agents |
+heat` | `true` | Run pnpm install serially beforeting agents |
 
 ```javascript
 ralph_batch_start({
