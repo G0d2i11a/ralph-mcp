@@ -78,6 +78,78 @@ Ralph MCP keeps the battle-tested foundations:
 - **Dependency Management** - PRDs can depend on other PRDs, auto-triggered when dependencies complete
 - **Stagnation Detection** - Auto-detects stuck agents (no progress, repeated errors) and marks as failed
 - **Agent Memory** - Persistent "Progress Log" learns from mistakes across User Stories
+## Why Long-Lived Agents?
+
+Ralph MCP's long-lived agent design differs from the original Ralph pattern. This section explains the reasoning behind both approaches.
+
+### Original Ralph Philosophy
+
+Geoffrey Huntley designed Ralph with a clear constraint in mind: **context window limits** (~170k tokens at the time). His philosophy:
+
+- **One User Story per agent process** - Each story gets a fresh agent with focused context
+- **Avoid multi-agent complexity** - No inter-agent communication or coordination overhead
+- **Fast feedback loops** - Quick iterations without context bloat
+- **Simple orchestration** - Script-based execution, easy to understand and debug
+
+This design was optimal for the constraints of 2024: limited context windows meant doing one thing well was better than trying to do everything at once.
+
+### Why Ralph MCP Changed This
+
+Ralph MCP adopts long-lived agents (one agent per PRD) because the constraints have evolved:
+
+**1. Larger Context Windows (200k+ tokens)**
+- Modern Claude models can handle entire PRDs with multiple User Stories
+- Context window is no longer the bottleneck for multi-story execution
+
+**2. Learning Accumulation**
+- Progress Log persists learnings across User Stories within the same PRD
+- Later stories benefit from discoveries made in earlier stories
+- Example: "US-001 found that `pnpm db:migrate:dev` must run after schema changes" → US-003 knows this upfront
+
+**3. Reduced Startup Overhead**
+- Spawning a new agent process per story adds latency (model loading, context injection)
+- Long-lived agents amortize this cost across all stories in a PRD
+
+**4. Context Continuity**
+- Agent remembers architectural decisions from previous stories
+- No need to re-explain project structure or conventions for each story
+- Natural conversation flow: "continue with the same approach from US-002"
+
+### Trade-offs Comparison
+
+| Aspect | Original Ralph | Ralph MCP |
+|--------|---------------|-----------|
+| **Context Window** | 170k tokens | 200k+ tokens |
+| **Agent Lifecycle** | Short (per User Story) | Long (per PRD) |
+| **Learning Accumulation** | None (fresh start each story) | Progress Log persists across stories |
+| **Startup Overhead** | High (every story) | Low (once per PRD) |
+| **Context Continuity** | None (stateless) | Full (agent remembers previous stories) |
+| **Complexity** | Simple (script-based) | Moderate (background runner + state management) |
+| **Best For** | Small context windows, simple PRDs | Large context windows, multi-story PRDs |
+
+### When to Use Each Approach
+
+**Original Ralph** is better when:
+- Context window is limited (<200k tokens)
+- PRDs are simple (1-3 User Stories)
+- You prefer script-based simplicity over automation
+- Each User Story is independent with no shared learnings
+
+**Ralph MCP** is better when:
+- Context window is large (200k+ tokens)
+- PRDs are complex (5+ User Stories)
+- You want parallel execution of multiple PRDs
+- Later stories benefit from earlier discoveries
+- You need background execution with state persistence
+
+### Design Philosophy
+
+Both approaches respect the same core principle: **structured, iterative execution with quality gates**. The difference is in how they manage agent lifecycle:
+
+- **Original Ralph**: "Do one thing well, then exit" (optimal for 2024 constraints)
+- **Ralph MCP**: "Do all related things in one session" (optimal for 2025+ capabilities)
+
+Ralph MCP doesn't replace the original pattern—it extends it for environments where context windows and automation infrastructure support longer-lived agents.
 - **Context Injection** - Inject project rules (CLAUDE.md) into agent context
 - **Auto Quality Gates** - Type check, lint, build before every commit
 - **Auto Merge** - Merges to main when all User Stories pass
