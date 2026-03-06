@@ -494,6 +494,13 @@ ralph_reset_stagnation({ branch: "ralph/prd-feature" })
 ralph_reset_stagnation({ branch: "ralph/prd-feature", resumeExecution: false })
 ```
 
+## Recent Improvements
+
+### 2026-03-06
+- Fixed progress detection false positives
+- Added commit count tracking to distinguish real progress from stagnation
+- Prevents agents from being marked as stagnant after successfully committing code
+
 ## Credits
 
 - [Geoffrey Huntley](https://ghuntley.com/) - Original Ralph pattern
