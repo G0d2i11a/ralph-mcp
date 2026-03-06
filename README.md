@@ -497,6 +497,7 @@ ralph_reset_stagnation({ branch: "ralph/prd-feature", resumeExecution: false })
 ## Recent Improvements
 
 ### 2026-03-06
+- **Verified completedUS skip logic**: Confirmed that ralph-mcp's database-driven architecture automatically skips completed User Stories via `stories.filter((s) => !s.passes)` in agent prompt generation. Unlike ralph-cli which required manual `completedUS.includes()` checks, ralph-mcp's design inherently prevents re-execution of completed stories.
 - Fixed progress detection false positives
 - Added commit count tracking to distinguish real progress from stagnation
 - Prevents agents from being marked as stagnant after successfully committing code
