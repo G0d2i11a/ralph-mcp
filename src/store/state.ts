@@ -131,6 +131,7 @@ export interface ExecutionRecord {
   lastError: string | null; // Last error for comparison
   lastFilesChanged: number; // Files changed in last update
   lastProgressAt: Date | null; // Last observed progress timestamp (git/log/files)
+  lastCommitCount: number | null; // Last observed commit count (for detecting new commits)
   // Current activity tracking
   currentStoryId: string | null; // Story currently being worked on
   currentStep: string | null; // Current step description (e.g., "implementing", "testing")
@@ -318,6 +319,7 @@ function deserializeState(file: StateFileV1): StateRuntime {
     lastError: typeof (e as any).lastError === "string" ? (e as any).lastError : null,
     lastFilesChanged: typeof (e as any).lastFilesChanged === "number" ? (e as any).lastFilesChanged : 0,
     lastProgressAt: typeof (e as any).lastProgressAt === "string" ? parseDate((e as any).lastProgressAt, "executions.lastProgressAt") : null,
+    lastCommitCount: typeof (e as any).lastCommitCount === "number" ? (e as any).lastCommitCount : null,
     // Current activity tracking defaults for backward compatibility
     currentStoryId: typeof (e as any).currentStoryId === "string" ? (e as any).currentStoryId : null,
     currentStep: typeof (e as any).currentStep === "string" ? (e as any).currentStep : null,
@@ -1062,6 +1064,7 @@ export interface StagnationCheckResult {
 
 export interface RecordLoopProgressSignals {
   gitHeadCommitMs?: number | null;
+  gitHeadCommitCount?: number | null;
   changedFilesMaxMtimeMs?: number | null;
   logMtimeMs?: number | null;
 }
@@ -1175,6 +1178,15 @@ export async function recordLoopResult(
 
     // Track progress across multiple signals (Phase 2)
     const prevProgressMs = exec.lastProgressAt?.getTime() ?? 0;
+    const prevCommitCount = exec.lastCommitCount ?? null;
+    const currentCommitCount = options?.progressSignals?.gitHeadCommitCount ?? null;
+    
+    // Check if commit count increased (new commits = progress)
+    const commitCountIncreased = 
+      prevCommitCount !== null && 
+      currentCommitCount !== null && 
+      currentCommitCount > prevCommitCount;
+    
     const signalMs = Math.max(
       filesChanged > 0 ? nowMs : 0,
       options?.progressSignals?.gitHeadCommitMs ?? 0,
@@ -1183,18 +1195,21 @@ export async function recordLoopResult(
     );
 
     // Treat the first observation as a baseline progress point to avoid immediate timeouts.
-    const progressed = prevProgressMs === 0 || signalMs > prevProgressMs;
+    // Also treat commit count increase as progress even if timestamps don't advance
+    const progressed = prevProgressMs === 0 || signalMs > prevProgressMs || commitCountIncreased;
 
     let nextProgressMs = prevProgressMs;
     if (prevProgressMs === 0) {
       nextProgressMs = signalMs > 0 ? signalMs : nowMs;
-    } else if (signalMs > prevProgressMs) {
-      nextProgressMs = signalMs;
+    } else if (signalMs > prevProgressMs || commitCountIncreased) {
+      // Update progress timestamp when signals advance OR when new commits detected
+      nextProgressMs = Math.max(signalMs, nowMs);
     }
 
     exec.lastProgressAt = new Date(nextProgressMs);
+    exec.lastCommitCount = currentCommitCount;
 
-    // Track no progress (but only when none of the signals advanced)
+    // Track no progress (but only when none of the signals advanced AND no new commits)
     if (progressed) {
       exec.consecutiveNoProgress = 0;
     } else {

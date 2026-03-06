@@ -30,6 +30,8 @@ export interface GitHeadInfo {
   sha: string | null;
   commitMs: number | null;
   message: string | null;
+  /** Total commit count on current branch (for progress detection) */
+  commitCount: number | null;
 }
 
 export interface ChangedFilesInfo {
@@ -53,6 +55,7 @@ export interface StaleDecision {
   debug: {
     gitHeadSha?: string | null;
     gitHeadMessage?: string | null;
+    gitHeadCommitCount?: number | null;
     changedFilesCount?: number;
     changedFilesSampled?: number;
   };
@@ -158,8 +161,16 @@ async function readFileTail(path: string, maxBytes: number): Promise<string | nu
   }
 }
 
+/**
+ * Get git HEAD information including commit count.
+ * 
+ * The commit count is used to detect progress even when working tree has no changes.
+ * This prevents false stagnation detection when the agent is making commits but not
+ * leaving uncommitted changes in the working directory.
+ */
 export async function getGitHeadInfo(gitCwd: string): Promise<GitHeadInfo> {
   try {
+    // Get commit SHA, timestamp, and message
     const { stdout } = await execAsync("git log -1 --format=%H%n%ct%n%B", {
       cwd: gitCwd,
       maxBuffer: 2 * 1024 * 1024,
@@ -170,13 +181,29 @@ export async function getGitHeadInfo(gitCwd: string): Promise<GitHeadInfo> {
     const commitMs = commitSec ? parseInt(commitSec, 10) * 1000 : NaN;
     const message = lines.slice(2).join("\n").trim() || null;
 
+    // Get total commit count on current branch
+    // This helps detect progress when commits are made without working tree changes
+    let commitCount: number | null = null;
+    try {
+      const { stdout: countStdout } = await execAsync("git rev-list --count HEAD", {
+        cwd: gitCwd,
+        maxBuffer: 1024 * 1024,
+      });
+      const count = parseInt(countStdout.trim(), 10);
+      commitCount = Number.isFinite(count) ? count : null;
+    } catch {
+      // If commit count fails, continue without it (backward compatible)
+      commitCount = null;
+    }
+
     return {
       sha,
       commitMs: Number.isFinite(commitMs) ? commitMs : null,
       message,
+      commitCount,
     };
   } catch {
-    return { sha: null, commitMs: null, message: null };
+    return { sha: null, commitMs: null, message: null, commitCount: null };
   }
 }
 
@@ -262,6 +289,7 @@ export async function evaluateExecutionStaleness(
     if (gitHead.commitMs) signals.gitHeadCommitMs = gitHead.commitMs;
     debug.gitHeadSha = gitHead.sha;
     debug.gitHeadMessage = gitHead.message;
+    debug.gitHeadCommitCount = gitHead.commitCount;
   }
 
   let logTail: string | null = null;

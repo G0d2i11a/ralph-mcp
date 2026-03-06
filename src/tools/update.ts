@@ -749,8 +749,10 @@ export async function update(input: UpdateInput): Promise<UpdateResult> {
   };
 
   const workDir = execution.worktreePath || execution.projectRoot;
+  const gitHeadInfo = stale.signals.gitCommits ? await getGitHeadInfo(workDir) : { commitMs: null, commitCount: null };
   const progressSignals = {
-    gitHeadCommitMs: stale.signals.gitCommits ? (await getGitHeadInfo(workDir)).commitMs : null,
+    gitHeadCommitMs: gitHeadInfo.commitMs,
+    gitHeadCommitCount: gitHeadInfo.commitCount,
     changedFilesMaxMtimeMs: stale.signals.fileChanges ? (await getChangedFilesInfo(workDir, stale.maxFilesToStat)).maxMtimeMs : null,
     logMtimeMs: stale.signals.logMtime && execution.logPath ? await getLogMtimeMs(execution.logPath) : null,
   };
