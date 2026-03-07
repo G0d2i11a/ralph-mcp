@@ -74,10 +74,102 @@ Ralph MCP keeps the battle-tested foundations:
 
 - **2-Step Workflow** - Just create PRD and run `ralph_start`, everything else is automatic
 - **Parallel Execution** - Run 5+ PRDs simultaneously with Claude Code Task tool
+- **Dual Agent Support** - Use Claude Code or Codex CLI for agent execution
 - **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
 - **Dependency Management** - PRDs can depend on other PRDs, auto-triggered when dependencies complete
 - **Stagnation Detection** - Auto-detects stuck agents (no progress, repeated errors) and marks as failed
 - **Agent Memory** - Persistent "Progress Log" learns from mistakes across User Stories
+
+## Agent Support
+
+Ralph MCP supports two agent providers for PRD execution:
+
+### Claude Code (Default)
+
+Uses Claude Opus 4 via Claude CLI for agent execution.
+
+**Requirements:**
+- Claude Code CLI installed
+- LiteLLM proxy running on `localhost:4000` (optional, for custom models)
+
+**Configuration:**
+```yaml
+# .ralph.yaml
+agent:
+  provider: claude
+  coAuthor: "Claude Opus 4.6 <noreply@anthropic.com>"
+```
+
+### Codex
+
+Uses GPT-5.3 Codex via Codex CLI for agent execution.
+
+**Requirements:**
+- Codex CLI installed
+- LiteLLM proxy running on `localhost:4000`
+- Environment variables:
+  ```bash
+  export OPENAI_BASE_URL=http://localhost:4000/v1
+  export OPENAI_API_KEY=<your-litellm-master-key>
+  ```
+
+**Configuration:**
+```yaml
+# .ralph.yaml
+agent:
+  provider: codex
+  coAuthor: "GPT-5.3 Codex <noreply@openai.com>"
+  
+  codex:
+    # Path to Codex CLI (default: "codex")
+    codexPath: "codex"
+    
+    # Approval policy for command execution
+    # Options: never, on-request, on-failure, untrusted
+    approvalPolicy: on-request
+    
+    # Sandbox mode for filesystem access
+    # Options: read-only, workspace-write, danger-full-access
+    sandboxMode: workspace-write
+    
+    # Execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)
+    level: L2
+    
+    # Max auto-recovery attempts when stalled
+    maxRecoveryAttempts: 2
+    
+    # Minutes of inactivity before detecting stall
+    stallTimeoutMinutes: 5
+```
+
+### Comparison
+
+| Feature | Claude Code | Codex |
+|---------|-------------|-------|
+| **Context Window** | 200k tokens | 128k tokens |
+| **Code Generation** | Excellent | Excellent |
+| **Reasoning** | Strong | Strong |
+| **Tool Use** | Native MCP | CLI-based |
+| **Approval Policy** | Skip permissions | Configurable |
+| **Sandbox Mode** | N/A | Configurable |
+| **Best For** | MCP integration, large context | CLI workflows, fine-grained control |
+
+### Switching Agents
+
+To switch between agents, update your `.ralph.yaml`:
+
+```yaml
+# Use Claude Code
+agent:
+  provider: claude
+
+# Use Codex
+agent:
+  provider: codex
+```
+
+Then restart the Ralph MCP server or run `ralph_doctor` to verify configuration.
+
 ## Why Long-Lived Agents?
 
 Ralph MCP's long-lived agent design differs from the original Ralph pattern. This section explains the reasoning behind both approaches.
