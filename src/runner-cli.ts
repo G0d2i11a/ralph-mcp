@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { Runner } from "./runner.js";
-import { ClaudeLauncher } from "./utils/launcher.js";
-import { createCodexLauncher } from "./utils/codex-launcher.js";
+import { createSdkLauncher } from "./utils/sdk-launcher.js";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { getRunnerConfig, listLiveMcpClients, listExecutions, RALPH_DATA_DIR } from "./store/state.js";
 import { acquireRunnerSingleton, type SingletonHandle } from "./utils/runner-singleton.js";
-import { loadConfig } from "./config/loader.js";
+import { getConfig } from "./config/loader.js";
 
 const RUNNER_PID_FILE = join(RALPH_DATA_DIR, "runner.pid");
 
@@ -111,8 +110,8 @@ Examples:
   ralph-runner --max-retries 5           # Allow 5 retry attempts
 
 The Runner polls for PRDs in 'ready' status and automatically starts them
-using the Claude CLI. It handles crash recovery by detecting timed-out
-launches and retrying up to the max-retries limit.
+using the configured agent SDK backend. It handles crash recovery by detecting
+timed-out launches and retrying up to the max-retries limit.
 
 Press Ctrl+C to stop the Runner gracefully.
 `);
@@ -218,24 +217,15 @@ async function main(): Promise<void> {
   log("info", `  Launch timeout: ${options.timeout}ms`);
   console.log("");
 
-  // Load config to determine agent provider
-  const loadedConfig = await loadConfig(process.cwd());
-  const agentProvider = loadedConfig.config.agent?.provider ?? "claude";
+  const config = getConfig(process.cwd());
+  const defaultAgentProvider = config.agent.provider ?? "codex";
 
-  // Create launcher based on provider
-  const launcher = agentProvider === "codex"
-    ? createCodexLauncher({
-        onLog: log,
-        codexPath: loadedConfig.config.agent?.codex?.codexPath,
-        approvalPolicy: loadedConfig.config.agent?.codex?.approvalPolicy,
-        sandboxMode: loadedConfig.config.agent?.codex?.sandboxMode,
-        level: loadedConfig.config.agent?.codex?.level,
-        maxRecoveryAttempts: loadedConfig.config.agent?.codex?.maxRecoveryAttempts,
-        stallTimeoutMinutes: loadedConfig.config.agent?.codex?.stallTimeoutMinutes,
-      })
-    : new ClaudeLauncher({ onLog: log });
+  const launcher = createSdkLauncher({
+    onLog: log,
+    launchTimeout: options.timeout,
+  });
 
-  log("info", `  Agent provider: ${agentProvider}`);
+  log("info", `  Default agent provider: ${defaultAgentProvider}`);
   console.log("");
 
   // Create runner

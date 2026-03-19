@@ -3,7 +3,7 @@ import { findExecutionByBranch, updateExecution } from "../store/state.js";
 
 export const setAgentIdInputSchema = z.object({
   branch: z.string().describe("Branch name"),
-  agentTaskId: z.string().describe("Claude Task agent ID"),
+  agentTaskId: z.string().describe("Agent task ID"),
   logPath: z
     .string()
     .nullable()

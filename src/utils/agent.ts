@@ -1,9 +1,8 @@
-import { exec } from "child_process";
-import { promisify } from "util";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
+import { AgentInvocationRouter } from "../agent-sdk/router.js";
 
-const execAsync = promisify(exec);
+const agentRouter = new AgentInvocationRouter();
 
 /**
  * Generate agent prompt for PRD execution
@@ -48,7 +47,7 @@ export function generateAgentPrompt(
         const acList = s.acceptanceCriteria.map((ac, idx) => {
           const acKey = `AC-${idx + 1}`;
           const evidence = acEvidence[acKey];
-          const status = evidence?.passes ? "âœ? : "â—?;
+          const status = evidence?.passes ? "[x]" : "[ ]";
           return `- ${status} AC-${idx + 1}: ${ac}${evidence?.passes ? ` (completed)` : ""}`;
         }).join("\n");
 
@@ -99,10 +98,10 @@ ${acList}
   let loopWarning = "";
   if (loopContext) {
     if (loopContext.consecutiveNoProgress >= 2) {
-      loopWarning = `\nâš ï¸ **WARNING**: No file changes detected for ${loopContext.consecutiveNoProgress} consecutive updates. If stuck, try a different approach or mark the story as blocked.\n`;
+      loopWarning = `\n[!] **WARNING**: No file changes detected for ${loopContext.consecutiveNoProgress} consecutive updates. If stuck, try a different approach or mark the story as blocked.\n`;
     }
     if (loopContext.consecutiveErrors >= 3) {
-      loopWarning += `\nâš ï¸ **WARNING**: Same error repeated ${loopContext.consecutiveErrors} times. Consider a different approach.\nLast error: ${loopContext.lastError?.slice(0, 200)}\n`;
+      loopWarning += `\n[!] **WARNING**: Same error repeated ${loopContext.consecutiveErrors} times. Consider a different approach.\nLast error: ${loopContext.lastError?.slice(0, 200)}\n`;
     }
   }
 
@@ -137,9 +136,9 @@ Before implementing, verify the story is small enough to complete in ONE context
 - Add a filter dropdown to a list
 
 **Too big (should have been split):**
-- "Build the entire dashboard" â†?schema, queries, UI components, filters
-- "Add authentication" â†?schema, middleware, login UI, session handling
-- "Refactor the API" â†?one story per endpoint
+- "Build the entire dashboard" -> schema, queries, UI components, filters
+- "Add authentication" -> schema, middleware, login UI, session handling
+- "Refactor the API" -> one story per endpoint
 
 **If a story seems too big:** Complete what you can, commit it, then call \`ralph_update\` with \`passes: false\` and notes explaining what remains. Do NOT produce broken code trying to finish everything.
 
@@ -243,11 +242,11 @@ Provide structured learnings in the \`notes\` field:
   - Declare expectedFiles BEFORE implementation (step 3)
   - New files/directories must be declared or explained
   - Changes outside declaration trigger scope guardrail check
-  - >50% divergence between declared and actual â†?requires re-evaluation
+  - >50% divergence between declared and actual -> requires re-evaluation
   - unexpectedFileExplanation format: \`[{ file: "path", reason: "why", isNewFile: true/false }]\`
 - **SCOPE GUARDRAILS (prevents large changes):**
-  - Warn threshold: >1500 lines or >15 files â†?must provide scopeExplanation
-  - Hard threshold: >3000 lines or >25 files â†?story rejected, must split
+  - Warn threshold: >1500 lines or >15 files -> must provide scopeExplanation
+  - Hard threshold: >3000 lines or >25 files -> story rejected, must split
   - scopeExplanation format: \`[{ file: "path/to/file.ts", reason: "why in scope", lines: 123 }]\`
   - Excluded from count: lock files, snapshots, dist/, build/, .next/
 - ALL commits must pass typecheck and build - broken code compounds across iterations
@@ -318,18 +317,45 @@ ${conflictFiles.map((f) => `- ${f}`).join("\n")}
 }
 
 /**
- * Start a Claude agent via CLI (for merge conflicts)
+ * Start a merge-resolution agent via the in-process SDK router.
+ *
+ * Keeps MCP behavior compatible with the old helper by returning the same
+ * { success, output } shape, while avoiding any direct CLI subprocess call.
  */
 export async function startMergeAgent(
   projectRoot: string,
   prompt: string
 ): Promise<{ success: boolean; output: string }> {
   try {
-    const { stdout, stderr } = await execAsync(
-      `echo "${prompt.replace(/"/g, '\\"')}" | claude --dangerously-skip-permissions --print`,
-      { cwd: projectRoot, maxBuffer: 10 * 1024 * 1024 }
-    );
-    return { success: true, output: stdout || stderr };
+    const handle = await agentRouter.invoke({
+      provider: "claude",
+      taskKind: "code",
+      cwd: projectRoot,
+      prompt,
+      model: "claude-opus-4-6",
+    });
+
+    let lastMessage = "";
+
+    for await (const event of handle.events) {
+      if (typeof event.message === "string" && event.message.trim().length > 0) {
+        lastMessage = event.message;
+      }
+    }
+
+    const result = await handle.wait();
+
+    if (result.status === "success") {
+      return {
+        success: true,
+        output: result.output || lastMessage,
+      };
+    }
+
+    return {
+      success: false,
+      output: result.error || result.output || lastMessage || `Agent ended with status ${result.status}`,
+    };
   } catch (error) {
     return {
       success: false,

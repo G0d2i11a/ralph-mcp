@@ -298,7 +298,7 @@ Add to `~/.claude/mcp.json`:
 
 ```json
 {
-  "mcrvers": {
+  "mcpServers": {
     "ralph": {
       "command": "npx",
       "args": ["ralph-mcp"]
@@ -321,6 +321,28 @@ Or if installed from source:
 ```
 
 Restart Claude Code to load.
+
+### Runner backend defaults
+
+- `ralph-runner` now launches PRDs through the SDK backend layer under `src/agent-sdk/`
+- The default provider is `codex`
+- Set `agent.provider: claude` to switch the runner to the Claude SDK backend
+- Legacy `agent.codex.codexPath` remains in the schema for compatibility, but the SDK runner ignores it
+
+Copy `examples/ralph.config.example.yaml` to `.ralph.yaml` in your project, or to `~/.ralph/config.yaml` for a global default:
+
+```yaml
+agent:
+  provider: codex
+  codex:
+    approvalPolicy: never
+    sandboxMode: workspace-write
+    level: L2
+
+# Optional: switch the runner to Claude SDK instead
+# agent:
+#   provider: claude
+```
 
 ## Claude Code Skill Setup (Recommended)
 
@@ -362,7 +384,7 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 | `ralph_stop` | Stop execution |
 | `ralph_merge` | Merge to main + cleanup worktree |
 | `ralph_merge_queue` | Manage serial merge queue |
-| `ralph_set_agent_id` | Record Task agent ID |
+| `ralph_set_agent_id` | Record agent task ID |
 | `ralph_retry` | Retry a failed PRD execution |
 | `ralph_reset_stagnation` | Reset stagnation counters after manual interion |
 

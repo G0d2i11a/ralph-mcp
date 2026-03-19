@@ -140,6 +140,7 @@ export async function createExecutionFromPrd(
     lastError: null,
     lastFilesChanged: 0,
     lastProgressAt: now,
+    lastCommitCount: null,
     // Current activity tracking
     currentStoryId: null,
     currentStep: null,
@@ -188,4 +189,3 @@ export async function createExecutionFromPrd(
     })),
   };
 }
-

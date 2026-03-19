@@ -76,6 +76,28 @@ npm run build
 
 重启 Claude Code 生效。
 
+### Runner 默认后端
+
+- `ralph-runner` 现在通过 `src/agent-sdk/` 下的 SDK 后端启动 PRD，而不是旧的 CLI launcher
+- 默认 provider 现在是 `codex`
+- 如需切换到 Claude SDK，可设置 `agent.provider: claude`
+- `agent.codex.codexPath` 仍保留在 schema 中做兼容，但 SDK runner 会忽略它
+
+可以将 `examples/ralph.config.example.yaml` 复制为项目内的 `.ralph.yaml`，或者复制到全局 `~/.ralph/config.yaml`：
+
+```yaml
+agent:
+  provider: codex
+  codex:
+    approvalPolicy: never
+    sandboxMode: workspace-write
+    level: L2
+
+# 如需切换到 Claude SDK：
+# agent:
+#   provider: claude
+```
+
 ## 工具列表
 
 | 工具 | 说明 |
@@ -87,7 +109,7 @@ npm run build
 | `ralph_stop` | 停止执行 |
 | `ralph_merge` | 合并到 main + 清理 worktree |
 | `ralph_merge_queue` | 管理串行合并队列 |
-| `ralph_set_agent_id` | 记录 Task agent ID |
+| `ralph_set_agent_id` | 记录 agent task ID |
 
 ## 使用方法
 

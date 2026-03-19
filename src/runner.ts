@@ -37,7 +37,7 @@ export interface LaunchResult {
   error?: string;
 }
 
-/** Launcher interface - implemented by launcher.ts */
+/** Launcher interface - implemented by SDK or CLI-backed launchers */
 export interface AgentLauncher {
   launch(prompt: string, cwd: string, executionId?: string): Promise<LaunchResult>;
 }
@@ -101,7 +101,7 @@ export class Runner {
 
   /**
    * Recover orphaned agents on Runner startup.
-   * When Claude Code restarts, running agents are killed but PRD status remains "running".
+   * When the host agent session restarts, running agents are killed but PRD status remains "running".
    * This method immediately marks them as interrupted for auto-recovery.
    */
   private async recoverOrphanedAgents(): Promise<void> {
@@ -178,7 +178,7 @@ export class Runner {
       // Check for timed-out starting PRDs
       await this.recoverTimedOutPrds();
 
-      // Auto-recover interrupted PRDs (e.g., from Claude Code restart)
+      // Auto-recover interrupted PRDs (e.g., from host agent session restart)
       await this.autoRecoverInterrupted();
 
       // Promote pending PRDs whose dependencies are now satisfied
@@ -357,7 +357,7 @@ export class Runner {
 
   /**
    * Auto-recover interrupted PRDs.
-   * When Claude Code is restarted, running agents are killed and PRDs become "interrupted".
+   * When the host agent session is restarted, running agents are killed and PRDs become "interrupted".
    * This method automatically calls retry() to set them back to "ready" for the Runner to pick up.
    */
   private async autoRecoverInterrupted(): Promise<void> {

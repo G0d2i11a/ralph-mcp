@@ -141,8 +141,8 @@ export type ModeConfig = z.infer<typeof ModeConfigSchema>;
 export const AgentConfigSchema = z.object({
   provider: z
     .enum(["claude", "codex"])
-    .default("claude")
-    .describe("Agent provider: 'claude' for Claude CLI, 'codex' for Codex CLI"),
+    .default("codex")
+    .describe("Agent provider SDK backend: 'codex' (default) or 'claude'"),
   coAuthor: z
     .string()
     .default("Claude Opus 4.5 <noreply@anthropic.com>")
@@ -156,19 +156,19 @@ export const AgentConfigSchema = z.object({
       codexPath: z
         .string()
         .default("codex")
-        .describe("Path to Codex CLI executable"),
+        .describe("Deprecated legacy Codex CLI path; ignored by the SDK runner"),
       approvalPolicy: z
         .enum(["never", "on-request", "on-failure", "untrusted"])
         .default("on-request")
-        .describe("Approval policy for command execution"),
+        .describe("Codex SDK approval policy for tool execution"),
       sandboxMode: z
         .enum(["read-only", "workspace-write", "danger-full-access"])
         .default("workspace-write")
-        .describe("Sandbox mode for filesystem access"),
+        .describe("Codex SDK sandbox mode for filesystem access"),
       level: z
         .enum(["L1", "L2", "L3", "L4"])
         .default("L2")
-        .describe("Execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)"),
+        .describe("Codex SDK execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)"),
       maxRecoveryAttempts: z
         .number()
         .default(2)
@@ -179,7 +179,7 @@ export const AgentConfigSchema = z.object({
         .describe("Minutes of inactivity before detecting stall"),
     })
     .default({})
-    .describe("Codex-specific configuration (only used when provider: codex)"),
+    .describe("Codex SDK configuration (used when provider: codex)"),
   stagnation: z
     .object({
       noProgressThreshold: z

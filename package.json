@@ -16,6 +16,8 @@
     "start": "node dist/index.js",
     "runner": "node dist/runner-cli.js",
     "runner:dev": "tsx src/runner-cli.ts",
+    "runner:watch-prds": "node dist/runner-cli.js --watch-prds",
+    "runner:watch-prds:dev": "tsx src/runner-cli.ts --watch-prds",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -49,6 +51,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "file:../agent-browser/node_modules/@anthropic-ai/claude-agent-sdk",
     "@modelcontextprotocol/sdk": "^1.25.3",
     "gray-matter": "^4.0.3",
     "node-notifier": "^10.0.1",
