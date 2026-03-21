@@ -18,6 +18,7 @@
     "runner:dev": "tsx src/runner-cli.ts",
     "runner:watch-prds": "node dist/runner-cli.js --watch-prds",
     "runner:watch-prds:dev": "tsx src/runner-cli.ts --watch-prds",
+    "smoke:claude:external": "node scripts/smoke-claude-external.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
