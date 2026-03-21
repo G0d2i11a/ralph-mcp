@@ -378,6 +378,35 @@ agent:
 #   provider: claude
 ```
 
+### PRD ingestion watcher
+
+`ralph-mcp` can run a second, independent watcher inside `ralph-runner` to ingest new PRD JSON files and feed them through the normal `ralph start` flow.
+
+- Enable it with `ralph-runner --watch-prds`
+- Provide the watch directory explicitly via `--watch-prds-dir`, `watchers.prdIngestion.watchDir`, or `RALPH_PRD_WATCH_DIR`
+- Existing matching files are bootstrapped as seen on first start, so only newly discovered files are ingested afterwards
+- If `projectRoot` is omitted, the watcher resolves it from the PRD JSON `repository` field
+
+Example CLI usage:
+
+```bash
+ralph-runner --watch-prds --watch-prds-dir ~/incoming-prds
+```
+
+Example config:
+
+```yaml
+watchers:
+  prdIngestion:
+    enabled: true
+    watchDir: ~/incoming-prds
+    filePattern: ^ez4ielts-.*\.json$
+    projectRoot: ~/Project/ez4ielts
+    worktree: true
+```
+
+The package scripts `npm run runner:watch-prds` and `pnpm runner:watch-prds` now call the same `--watch-prds` flag, so they work as soon as one of the explicit watch directory inputs above is configured.
+
 ## Claude Code Skill Setup (Recommended)
 
 For the best experience, create a skill file that teaches Claude how to use Ralph.

@@ -83,6 +83,28 @@ npm run build
 - 当 CLI 启动失败时，Runner 会回退到 SDK backend
 - 如需强制走 SDK，可设置 `agent.backend: sdk`
 
+### PRD Watch
+
+`ralph-mcp` 自己也有一套 Runner 侧的 PRD 自动摄入 watch，这和 `ralph-cli` 的 watch 是两套独立能力。
+
+- 命令行启用：`ralph-runner --watch-prds --watch-prds-dir ~/prds`
+- 或在 `.ralph.yaml` / `~/.ralph/config.yaml` 里配置 `watchers.prdIngestion`
+- 首次启动时，当前已存在的匹配文件只会被标记为已见，不会回补执行
+- 新出现的 PRD 仍然会先进入 Ralph 正常状态机，再由 Runner 拉起
+
+示例：
+
+```yaml
+watchers:
+  prdIngestion:
+    enabled: true
+    watchDir: ~/prds
+    filePattern: '^ez4ielts-.*\.json$'
+    scanIntervalMs: 15000
+    settleMs: 1500
+    worktree: true
+```
+
 可以将 `examples/ralph.config.example.yaml` 复制为项目内的 `.ralph.yaml`，或者复制到全局 `~/.ralph/config.yaml`：
 
 ```yaml

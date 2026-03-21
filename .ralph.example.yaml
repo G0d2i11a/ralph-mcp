@@ -120,3 +120,13 @@ gates:
     timeoutMs: 180000
     required: true
     when: pre-merge
+
+# Optional: enable PRD ingestion watch for ralph-mcp Runner
+watchers:
+  prdIngestion:
+    enabled: false
+    # watchDir: "~/prds"
+    filePattern: "^ez4ielts-.*\\.json$"
+    scanIntervalMs: 15000
+    settleMs: 1500
+    worktree: true

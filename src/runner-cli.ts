@@ -4,9 +4,12 @@ import { createLauncher } from "./utils/launcher.js";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { pathToFileURL } from "url";
 import { getRunnerConfig, listLiveMcpClients, listExecutions, RALPH_DATA_DIR } from "./store/state.js";
 import { acquireRunnerSingleton, type SingletonHandle } from "./utils/runner-singleton.js";
 import { getConfig } from "./config/loader.js";
+import type { RalphConfig } from "./config/schema.js";
+import { PrdIngestionWatcher, isPrdWatchEnabled, type PrdIngestionWatcherOptions } from "./watchers/prd-ingestion-watcher.js";
 
 const RUNNER_PID_FILE = join(RALPH_DATA_DIR, "runner.pid");
 
@@ -28,15 +31,80 @@ function removePidFile(): void {
   }
 }
 
-interface CliOptions {
+export interface CliOptions {
   interval: number;
   concurrency: number;
   maxRetries: number;
   timeout: number;
+  watchPrds?: boolean;
+  watchPrdsDir?: string;
+  watchPrdsPattern?: string;
+  watchPrdsProjectRoot?: string;
+  watchPrdsStatePath?: string;
+  watchPrdsScanIntervalMs?: number;
+  watchPrdsSettleMs?: number;
+  watchPrdsWorktree?: boolean;
 }
 
-function parseArgs(): CliOptions {
-  const args = process.argv.slice(2);
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+export function resolvePrdWatchOptions(
+  options: CliOptions,
+  config: RalphConfig
+): PrdIngestionWatcherOptions | null {
+  const watchConfig = config.watchers.prdIngestion;
+  const enabled = options.watchPrds ?? (watchConfig.enabled || isPrdWatchEnabled());
+
+  if (!enabled) {
+    return null;
+  }
+
+  const watchDir = firstNonEmpty(
+    options.watchPrdsDir,
+    watchConfig.watchDir,
+    process.env.RALPH_PRD_WATCH_DIR
+  );
+
+  if (!watchDir) {
+    throw new Error(
+      "PRD watcher requires an explicit watch directory. Pass `--watch-prds-dir`, set `watchers.prdIngestion.watchDir`, or set `RALPH_PRD_WATCH_DIR`."
+    );
+  }
+
+  return {
+    watchDir,
+    filePattern: firstNonEmpty(
+      options.watchPrdsPattern,
+      watchConfig.filePattern,
+      process.env.RALPH_PRD_WATCH_PATTERN
+    ),
+    projectRoot: firstNonEmpty(
+      options.watchPrdsProjectRoot,
+      watchConfig.projectRoot,
+      process.env.RALPH_PRD_WATCH_PROJECT_ROOT
+    ),
+    statePath: firstNonEmpty(
+      options.watchPrdsStatePath,
+      watchConfig.statePath,
+      process.env.RALPH_PRD_WATCH_STATE_PATH
+    ),
+    scanIntervalMs:
+      options.watchPrdsScanIntervalMs ?? watchConfig.scanIntervalMs,
+    settleMs:
+      options.watchPrdsSettleMs ?? watchConfig.settleMs,
+    worktree: options.watchPrdsWorktree ?? watchConfig.worktree,
+  };
+}
+
+export function parseArgs(args = process.argv.slice(2)): CliOptions {
   const options: CliOptions = {
     interval: 5000,
     concurrency: 0, // 0 = auto (use state.json runnerConfig.maxConcurrency)
@@ -73,6 +141,54 @@ function parseArgs(): CliOptions {
           i++;
         }
         break;
+      case "--watch-prds":
+        options.watchPrds = true;
+        break;
+      case "--no-watch-prds":
+        options.watchPrds = false;
+        break;
+      case "--watch-prds-dir":
+        if (nextArg) {
+          options.watchPrdsDir = nextArg;
+          i++;
+        }
+        break;
+      case "--watch-prds-pattern":
+        if (nextArg) {
+          options.watchPrdsPattern = nextArg;
+          i++;
+        }
+        break;
+      case "--watch-prds-project-root":
+        if (nextArg) {
+          options.watchPrdsProjectRoot = nextArg;
+          i++;
+        }
+        break;
+      case "--watch-prds-state-path":
+        if (nextArg) {
+          options.watchPrdsStatePath = nextArg;
+          i++;
+        }
+        break;
+      case "--watch-prds-scan-interval":
+        if (nextArg) {
+          options.watchPrdsScanIntervalMs = parseInt(nextArg, 10);
+          i++;
+        }
+        break;
+      case "--watch-prds-settle-ms":
+        if (nextArg) {
+          options.watchPrdsSettleMs = parseInt(nextArg, 10);
+          i++;
+        }
+        break;
+      case "--watch-prds-worktree":
+        options.watchPrdsWorktree = true;
+        break;
+      case "--watch-prds-no-worktree":
+        options.watchPrdsWorktree = false;
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -101,6 +217,24 @@ Options:
   --concurrency <n>    Maximum concurrent PRD launches (default: auto from state.json)
   --max-retries <n>    Maximum launch retry attempts (default: 3)
   --timeout <ms>       Launch timeout in milliseconds (default: 60000)
+  --watch-prds         Enable PRD ingestion watcher for new JSON PRDs
+  --watch-prds-dir <path>
+                       Directory to watch for new PRD JSON files
+  --watch-prds-pattern <regex>
+                       Regex pattern for watched filenames (default: ^ez4ielts-.*\\.json$)
+  --watch-prds-project-root <path>
+                       Project root override for auto-ingested PRDs
+  --watch-prds-state-path <path>
+                       Override the watcher state file path
+  --watch-prds-scan-interval <ms>
+                       Directory rescan interval for the watcher
+  --watch-prds-settle-ms <ms>
+                       Delay before ingesting a newly written file
+  --watch-prds-worktree
+                       Force worktree creation for auto-ingested PRDs
+  --watch-prds-no-worktree
+                       Disable worktree creation for auto-ingested PRDs
+  --no-watch-prds      Disable the PRD ingestion watcher even if config enables it
   -h, --help           Show this help message
 
 Examples:
@@ -108,10 +242,15 @@ Examples:
   ralph-runner --interval 10000          # Poll every 10 seconds
   ralph-runner --concurrency 3           # Launch up to 3 PRDs concurrently
   ralph-runner --max-retries 5           # Allow 5 retry attempts
+  ralph-runner --watch-prds --watch-prds-dir ~/prds
 
 The Runner polls for PRDs in 'ready' status and automatically starts them
 using the configured agent backend. CLI is the default path, with SDK kept
 available as a fallback/backend override.
+
+When --watch-prds is enabled, you must provide a watch directory explicitly
+via --watch-prds-dir, config `watchers.prdIngestion.watchDir`, or
+`RALPH_PRD_WATCH_DIR`.
 
 Press Ctrl+C to stop the Runner gracefully.
 `);
@@ -182,6 +321,14 @@ function installIdleMonitor(
 
 async function main(): Promise<void> {
   const options = parseArgs();
+  const config = getConfig(process.cwd());
+  const prdWatchOptions = resolvePrdWatchOptions(options, config);
+  const prdWatcher = prdWatchOptions
+    ? new PrdIngestionWatcher({
+        ...prdWatchOptions,
+        onLog: log,
+      })
+    : null;
 
   const singleton = await acquireRunnerSingleton();
   if (!singleton) {
@@ -215,9 +362,6 @@ async function main(): Promise<void> {
   );
   log("info", `  Max retries: ${options.maxRetries}`);
   log("info", `  Launch timeout: ${options.timeout}ms`);
-  console.log("");
-
-  const config = getConfig(process.cwd());
   const defaultAgentBackend = config.agent.backend ?? "cli";
   const defaultAgentProvider = config.agent.provider ?? "codex";
 
@@ -228,6 +372,10 @@ async function main(): Promise<void> {
 
   log("info", `  Default agent backend: ${defaultAgentBackend}`);
   log("info", `  Default agent provider: ${defaultAgentProvider}`);
+  log(
+    "info",
+    `  PRD ingestion watcher: ${prdWatcher ? `enabled (${prdWatcher.describe()})` : "disabled"}`
+  );
   console.log("");
 
   // Create runner
@@ -260,6 +408,7 @@ async function main(): Promise<void> {
 
     shuttingDown = true;
     log("info", "Shutting down gracefully (press Ctrl+C again to force)...");
+    prdWatcher?.stop();
     runner.stop();
 
     // Give some time for cleanup
@@ -283,6 +432,11 @@ async function main(): Promise<void> {
     shutdown();
   });
 
+  if (prdWatcher) {
+    log("info", "Starting PRD ingestion watcher...");
+    await prdWatcher.start();
+  }
+
   // Start the runner
   log("info", "Starting Runner...");
   runner.start();
@@ -293,7 +447,13 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+const isEntrypoint = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isEntrypoint) {
+  main().catch((error) => {
+    console.error("Fatal error:", error);
+    process.exit(1);
+  });
+}

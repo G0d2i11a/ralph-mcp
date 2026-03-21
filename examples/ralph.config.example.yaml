@@ -17,3 +17,12 @@ agent:
 # agent:
 #   backend: sdk
 #   provider: claude
+
+watchers:
+  prdIngestion:
+    enabled: false
+    # watchDir: ~/prds
+    filePattern: '^ez4ielts-.*\.json$'
+    scanIntervalMs: 15000
+    settleMs: 1500
+    worktree: true

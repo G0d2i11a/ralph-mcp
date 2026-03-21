@@ -319,6 +319,53 @@ export const MergeConfigSchema = z.object({
 export type MergeConfig = z.infer<typeof MergeConfigSchema>;
 
 // =============================================================================
+// WATCHER CONFIGURATION
+// =============================================================================
+
+export const PrdIngestionWatcherConfigSchema = z.object({
+  enabled: z
+    .boolean()
+    .default(false)
+    .describe("Enable the PRD ingestion watcher alongside Ralph Runner"),
+  watchDir: z
+    .string()
+    .optional()
+    .describe("Directory to watch for new PRD JSON files"),
+  filePattern: z
+    .string()
+    .optional()
+    .describe("Regex pattern for PRD filenames"),
+  projectRoot: z
+    .string()
+    .optional()
+    .describe("Project root override for ingested PRDs (defaults to PRD metadata)"),
+  statePath: z
+    .string()
+    .optional()
+    .describe("Path to persistent watcher state file"),
+  scanIntervalMs: z
+    .number()
+    .optional()
+    .describe("How often to rescan the watch directory (default: 15000ms)"),
+  settleMs: z
+    .number()
+    .optional()
+    .describe("How long to wait for file writes to settle before ingesting (default: 1500ms)"),
+  worktree: z
+    .boolean()
+    .optional()
+    .describe("Whether auto-ingested PRDs should create worktrees"),
+});
+
+export type PrdIngestionWatcherConfig = z.infer<typeof PrdIngestionWatcherConfigSchema>;
+
+export const WatchersConfigSchema = z.object({
+  prdIngestion: PrdIngestionWatcherConfigSchema.default({}),
+});
+
+export type WatchersConfig = z.infer<typeof WatchersConfigSchema>;
+
+// =============================================================================
 // FULL CONFIGURATION
 // =============================================================================
 
@@ -338,6 +385,7 @@ export const RalphConfigSchema = z.object({
   scope: ScopeConfigSchema.default({}),
   modes: ModeConfigSchema.default({}),
   agent: AgentConfigSchema.default({}),
+  watchers: WatchersConfigSchema.default({}),
   notifications: NotificationConfigSchema.default({}),
   merge: MergeConfigSchema.default({}),
 });
