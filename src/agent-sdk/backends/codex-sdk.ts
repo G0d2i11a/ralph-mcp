@@ -82,18 +82,38 @@ export class CodexSdkBackend implements AgentBackend {
     } catch {
       const backendDir = dirname(fileURLToPath(import.meta.url));
       const repoRoot = resolve(backendDir, "..", "..", "..");
-      const fallbackPath = join(
-        repoRoot,
-        "..",
-        "sdk-runners",
-        "node_modules",
-        "@openai",
-        "codex-sdk",
-        "dist",
-        "index.js"
-      );
+      const fallbackPaths = [
+        join(
+          repoRoot,
+          "..",
+          "agent-runners",
+          "node_modules",
+          "@openai",
+          "codex-sdk",
+          "dist",
+          "index.js"
+        ),
+        join(
+          repoRoot,
+          "..",
+          "sdk-runners",
+          "node_modules",
+          "@openai",
+          "codex-sdk",
+          "dist",
+          "index.js"
+        ),
+      ];
 
-      return await import(pathToFileURL(fallbackPath).href);
+      for (const fallbackPath of fallbackPaths) {
+        try {
+          return await import(pathToFileURL(fallbackPath).href);
+        } catch {
+          continue;
+        }
+      }
+
+      throw new Error("@openai/codex-sdk package not found");
     }
   }
 
