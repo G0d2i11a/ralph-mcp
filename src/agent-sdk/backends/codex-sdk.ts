@@ -7,7 +7,7 @@ import type {
   AgentEvent,
   AgentResult,
 } from "../types.js";
-import { writeFileSync, appendFileSync } from "fs";
+import { existsSync, writeFileSync, appendFileSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { resolveAgentLogPath } from "../log-path.js";
@@ -15,6 +15,8 @@ import { resolveAgentLogPath } from "../log-path.js";
 type CodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
 type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type CodexLevel = "L1" | "L2" | "L3" | "L4";
+
+const OPENCLAW_ROOT = "/Users/shawn/Workspace/openclaw";
 
 type UsageLike = {
   input_tokens?: number;
@@ -82,30 +84,21 @@ export class CodexSdkBackend implements AgentBackend {
     } catch {
       const backendDir = dirname(fileURLToPath(import.meta.url));
       const repoRoot = resolve(backendDir, "..", "..", "..");
+      const fallbackRoots = [OPENCLAW_ROOT, resolve(repoRoot, "..")];
       const fallbackPaths = [
-        join(
-          repoRoot,
-          "..",
-          "agent-runners",
-          "node_modules",
-          "@openai",
-          "codex-sdk",
-          "dist",
-          "index.js"
+        ...fallbackRoots.map((root) =>
+          join(root, "agent-runners", "node_modules", "@openai", "codex-sdk", "dist", "index.js")
         ),
-        join(
-          repoRoot,
-          "..",
-          "sdk-runners",
-          "node_modules",
-          "@openai",
-          "codex-sdk",
-          "dist",
-          "index.js"
+        ...fallbackRoots.map((root) =>
+          join(root, "sdk-runners", "node_modules", "@openai", "codex-sdk", "dist", "index.js")
         ),
       ];
 
-      for (const fallbackPath of fallbackPaths) {
+      for (const fallbackPath of new Set(fallbackPaths)) {
+        if (!existsSync(fallbackPath)) {
+          continue;
+        }
+
         try {
           return await import(pathToFileURL(fallbackPath).href);
         } catch {
