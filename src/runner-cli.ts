@@ -249,8 +249,8 @@ using the configured agent backend. CLI is the default path, with SDK kept
 available as a fallback/backend override.
 
 When --watch-prds is enabled, you must provide a watch directory explicitly
-via --watch-prds-dir, config `watchers.prdIngestion.watchDir`, or
-`RALPH_PRD_WATCH_DIR`.
+via --watch-prds-dir, config watchers.prdIngestion.watchDir, or
+RALPH_PRD_WATCH_DIR.
 
 Press Ctrl+C to stop the Runner gracefully.
 `);
