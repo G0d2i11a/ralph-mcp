@@ -78,23 +78,31 @@ npm run build
 
 ### Runner 默认后端
 
-- `ralph-runner` 现在通过 `src/agent-sdk/` 下的 SDK 后端启动 PRD，而不是旧的 CLI launcher
-- 默认 provider 现在是 `codex`
-- 如需切换到 Claude SDK，可设置 `agent.provider: claude`
-- `agent.codex.codexPath` 仍保留在 schema 中做兼容，但 SDK runner 会忽略它
+- `ralph-runner` 现在将 backend 和 provider 分开解析
+- 默认行为是 `agent.backend: cli` + `agent.provider: codex`
+- 当 CLI 启动失败时，Runner 会回退到 SDK backend
+- 如需强制走 SDK，可设置 `agent.backend: sdk`
 
 可以将 `examples/ralph.config.example.yaml` 复制为项目内的 `.ralph.yaml`，或者复制到全局 `~/.ralph/config.yaml`：
 
 ```yaml
 agent:
+  backend: cli
   provider: codex
   codex:
+    codexPath: codex
     approvalPolicy: never
     sandboxMode: workspace-write
     level: L2
 
-# 如需切换到 Claude SDK：
+# 如需切换到 Claude CLI：
 # agent:
+#   backend: cli
+#   provider: claude
+
+# 如需强制使用 SDK：
+# agent:
+#   backend: sdk
 #   provider: claude
 ```
 

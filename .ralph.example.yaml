@@ -3,21 +3,34 @@
 
 # Agent configuration
 agent:
-  # Agent provider: "claude" (default) or "codex"
-  # - claude: Uses Claude CLI for agent execution
-  # - codex: Uses Codex CLI for agent execution
-  provider: claude
+  # Agent backend: "cli" (default) or "sdk"
+  # - cli: Launches provider CLIs directly
+  # - sdk: Uses the in-process SDK backend layer
+  backend: cli
+
+  # Agent provider: "codex" (default) or "claude"
+  # - codex: Uses Codex CLI / Codex SDK
+  # - claude: Uses Claude CLI / Claude SDK
+  provider: codex
 
   # Co-author for git commits
-  coAuthor: "Claude Opus 4.6 <noreply@anthropic.com>"
+  coAuthor: "GPT-5.3 Codex <noreply@openai.com>"
 
   # Optional: Path to context file to inject into agent prompt
   # contextInjectionPath: "CLAUDE.md"
 
-  # Codex-specific settings (only used when provider: codex)
+  # Claude-specific CLI settings (only used when provider: claude and backend: cli)
+  claude:
+    # Path to Claude CLI executable (default: "claude")
+    # claudePath: "claude"
+
+    # Additional Claude CLI flags
+    additionalFlags: []
+
+  # Codex-specific settings (used when provider: codex)
   codex:
     # Path to Codex CLI executable (default: "codex")
-    # codexPath: "codex"
+    codexPath: "codex"
 
     # Approval policy for command execution
     # Options: never, on-request, on-failure, untrusted

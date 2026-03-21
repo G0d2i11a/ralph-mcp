@@ -139,10 +139,14 @@ export type ModeConfig = z.infer<typeof ModeConfigSchema>;
 // =============================================================================
 
 export const AgentConfigSchema = z.object({
+  backend: z
+    .enum(["cli", "sdk"])
+    .default("cli")
+    .describe("Agent execution backend: 'cli' (default) or 'sdk'"),
   provider: z
     .enum(["claude", "codex"])
     .default("codex")
-    .describe("Agent provider SDK backend: 'codex' (default) or 'claude'"),
+    .describe("Agent provider: 'codex' (default) or 'claude'; backend is configured separately"),
   coAuthor: z
     .string()
     .default("Claude Opus 4.5 <noreply@anthropic.com>")
@@ -151,35 +155,48 @@ export const AgentConfigSchema = z.object({
     .string()
     .optional()
     .describe("Path to context file to inject into agent prompt"),
+  claude: z
+    .object({
+      claudePath: z
+        .string()
+        .default("claude")
+        .describe("Path to Claude CLI executable (used when provider: claude and backend: cli)"),
+      additionalFlags: z
+        .array(z.string())
+        .default([])
+        .describe("Additional flags passed to Claude CLI when backend: cli"),
+    })
+    .default({})
+    .describe("Claude CLI configuration (used when provider: claude and backend: cli)"),
   codex: z
     .object({
       codexPath: z
         .string()
         .default("codex")
-        .describe("Deprecated legacy Codex CLI path; ignored by the SDK runner"),
+        .describe("Path to Codex CLI executable (used when provider: codex and backend: cli)"),
       approvalPolicy: z
         .enum(["never", "on-request", "on-failure", "untrusted"])
         .default("on-request")
-        .describe("Codex SDK approval policy for tool execution"),
+        .describe("Codex approval policy for tool execution (used by CLI and SDK backends)"),
       sandboxMode: z
         .enum(["read-only", "workspace-write", "danger-full-access"])
         .default("workspace-write")
-        .describe("Codex SDK sandbox mode for filesystem access"),
+        .describe("Codex sandbox mode for filesystem access (used by CLI and SDK backends)"),
       level: z
         .enum(["L1", "L2", "L3", "L4"])
         .default("L2")
-        .describe("Codex SDK execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)"),
+        .describe("Codex execution level (L1=Executor, L2=Builder, L3=Autonomous, L4=Specialist)"),
       maxRecoveryAttempts: z
         .number()
         .default(2)
-        .describe("Max auto-recovery attempts when stalled"),
+        .describe("Max auto-recovery attempts when Codex CLI stalls"),
       stallTimeoutMinutes: z
         .number()
         .default(5)
-        .describe("Minutes of inactivity before detecting stall"),
+        .describe("Minutes of inactivity before detecting Codex CLI stall"),
     })
     .default({})
-    .describe("Codex SDK configuration (used when provider: codex)"),
+    .describe("Codex configuration (used when provider: codex)"),
   stagnation: z
     .object({
       noProgressThreshold: z

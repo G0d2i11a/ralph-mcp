@@ -1,8 +1,194 @@
+import { spawn } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { AgentInvocationRouter } from "../agent-sdk/router.js";
+import type { Provider } from "../agent-sdk/types.js";
+import { resolveAgentLaunchConfig, type ResolvedAgentLaunchConfig } from "./launcher.js";
 
 const agentRouter = new AgentInvocationRouter();
+
+function quoteForBash(value: string): string {
+  return `"${value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, "\\$")
+    .replace(/`/g, "\\`")}"`;
+}
+
+function getGitBashPath(): string {
+  return process.env.CLAUDE_CODE_GIT_BASH_PATH
+    || (existsSync("D:\\Software\\Git\\bin\\bash.exe") ? "D:\\Software\\Git\\bin\\bash.exe" : "")
+    || (existsSync("C:\\Program Files\\Git\\bin\\bash.exe") ? "C:\\Program Files\\Git\\bin\\bash.exe" : "")
+    || "bash.exe";
+}
+
+async function collectProcessResult(
+  child: ReturnType<typeof spawn>,
+  input?: string
+): Promise<{ success: boolean; output: string }> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve({
+        success: false,
+        output: error.message,
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n\n");
+
+      resolve({
+        success: code === 0,
+        output:
+          output
+          || (code === 0
+            ? "Completed without output"
+            : `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ""}`),
+      });
+    });
+
+    if (child.stdin) {
+      child.stdin.on("error", () => {});
+
+      if (input) {
+        child.stdin.end(input);
+      } else {
+        child.stdin.end();
+      }
+    }
+  });
+}
+
+async function runMergeAgentViaCli(
+  projectRoot: string,
+  prompt: string,
+  config: ResolvedAgentLaunchConfig
+): Promise<{ success: boolean; output: string }> {
+  if (config.provider === "codex") {
+    const child = spawn(
+      config.codex.codexPath,
+      [
+        "--non-interactive",
+        "--approval-policy", config.codex.approvalPolicy,
+        "--sandbox-mode", config.codex.sandboxMode,
+        "--level", config.codex.level,
+        "--max-recovery-attempts", String(config.codex.maxRecoveryAttempts),
+        "--stall-timeout-minutes", String(config.codex.stallTimeoutMinutes),
+        prompt,
+      ],
+      {
+        cwd: projectRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: process.env,
+      }
+    );
+
+    return collectProcessResult(child);
+  }
+
+  const args = [
+    "--print",
+    "--dangerously-skip-permissions",
+    ...config.claude.additionalFlags,
+  ];
+
+  const isWindows = process.platform === "win32";
+  const gitBashPath = getGitBashPath();
+
+  const child = isWindows
+    ? spawn(
+      gitBashPath,
+      [
+        "-c",
+        `export CLAUDE_CODE_GIT_BASH_PATH=${quoteForBash(gitBashPath)} && cat | ${quoteForBash(config.claude.claudePath)} ${args.map(quoteForBash).join(" ")}`,
+      ],
+      {
+        cwd: projectRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          CLAUDE_CODE_GIT_BASH_PATH: gitBashPath,
+        },
+      }
+    )
+    : spawn(config.claude.claudePath, args, {
+      cwd: projectRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    });
+
+  return collectProcessResult(child, prompt);
+}
+
+async function runMergeAgentViaSdk(
+  projectRoot: string,
+  prompt: string,
+  provider: Provider,
+  config: ResolvedAgentLaunchConfig
+): Promise<{ success: boolean; output: string }> {
+  const metadata = provider === "codex"
+    ? {
+      codex: {
+        approvalPolicy: config.codex.approvalPolicy,
+        sandboxMode: config.codex.sandboxMode,
+        level: config.codex.level,
+      },
+    }
+    : undefined;
+
+  const handle = await agentRouter.invoke({
+    provider,
+    taskKind: "code",
+    cwd: projectRoot,
+    prompt,
+    model: provider === "claude" ? "claude-opus-4-6" : undefined,
+    metadata,
+  });
+
+  let lastMessage = "";
+
+  for await (const event of handle.events) {
+    if (typeof event.message === "string" && event.message.trim().length > 0) {
+      lastMessage = event.message;
+    }
+  }
+
+  const result = await handle.wait();
+
+  if (result.status === "success") {
+    return {
+      success: true,
+      output: result.output || lastMessage,
+    };
+  }
+
+  return {
+    success: false,
+    output: result.error || result.output || lastMessage || `Agent ended with status ${result.status}`,
+  };
+}
 
 /**
  * Generate agent prompt for PRD execution
@@ -317,45 +503,36 @@ ${conflictFiles.map((f) => `- ${f}`).join("\n")}
 }
 
 /**
- * Start a merge-resolution agent via the in-process SDK router.
+ * Start a merge-resolution agent using the configured backend/provider.
  *
- * Keeps MCP behavior compatible with the old helper by returning the same
- * { success, output } shape, while avoiding any direct CLI subprocess call.
+ * CLI is attempted first when configured, with SDK kept as a fallback so
+ * existing merge-agent flows keep working even if the CLI launch fails.
  */
 export async function startMergeAgent(
   projectRoot: string,
   prompt: string
 ): Promise<{ success: boolean; output: string }> {
   try {
-    const handle = await agentRouter.invoke({
-      provider: "claude",
-      taskKind: "code",
-      cwd: projectRoot,
-      prompt,
-      model: "claude-opus-4-6",
-    });
+    const config = resolveAgentLaunchConfig(projectRoot);
 
-    let lastMessage = "";
-
-    for await (const event of handle.events) {
-      if (typeof event.message === "string" && event.message.trim().length > 0) {
-        lastMessage = event.message;
+    if (config.backend === "cli") {
+      const cliResult = await runMergeAgentViaCli(projectRoot, prompt, config);
+      if (cliResult.success) {
+        return cliResult;
       }
-    }
 
-    const result = await handle.wait();
+      const sdkResult = await runMergeAgentViaSdk(projectRoot, prompt, config.provider, config);
+      if (sdkResult.success) {
+        return sdkResult;
+      }
 
-    if (result.status === "success") {
       return {
-        success: true,
-        output: result.output || lastMessage,
+        success: false,
+        output: `CLI merge agent failed: ${cliResult.output}\n\nSDK fallback failed: ${sdkResult.output}`,
       };
     }
 
-    return {
-      success: false,
-      output: result.error || result.output || lastMessage || `Agent ended with status ${result.status}`,
-    };
+    return runMergeAgentViaSdk(projectRoot, prompt, config.provider, config);
   } catch (error) {
     return {
       success: false,

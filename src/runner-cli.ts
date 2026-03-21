@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Runner } from "./runner.js";
-import { createSdkLauncher } from "./utils/sdk-launcher.js";
+import { createLauncher } from "./utils/launcher.js";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -110,8 +110,8 @@ Examples:
   ralph-runner --max-retries 5           # Allow 5 retry attempts
 
 The Runner polls for PRDs in 'ready' status and automatically starts them
-using the configured agent SDK backend. It handles crash recovery by detecting
-timed-out launches and retrying up to the max-retries limit.
+using the configured agent backend. CLI is the default path, with SDK kept
+available as a fallback/backend override.
 
 Press Ctrl+C to stop the Runner gracefully.
 `);
@@ -218,13 +218,15 @@ async function main(): Promise<void> {
   console.log("");
 
   const config = getConfig(process.cwd());
+  const defaultAgentBackend = config.agent.backend ?? "cli";
   const defaultAgentProvider = config.agent.provider ?? "codex";
 
-  const launcher = createSdkLauncher({
+  const launcher = createLauncher({
     onLog: log,
     launchTimeout: options.timeout,
   });
 
+  log("info", `  Default agent backend: ${defaultAgentBackend}`);
   log("info", `  Default agent provider: ${defaultAgentProvider}`);
   console.log("");
 

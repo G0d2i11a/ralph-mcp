@@ -73,8 +73,8 @@ Ralph MCP keeps the battle-tested foundations:
 ## Features
 
 - **2-Step Workflow** - Just create PRD and run `ralph_start`, everything else is automatic
-- **Parallel Execution** - Run 5+ PRDs simultaneously with Claude Code Task tool
-- **Dual Agent Support** - Use Claude Code or Codex CLI for agent execution
+- **Parallel Execution** - Run 5+ PRDs simultaneously with long-lived Ralph agents
+- **CLI-First Agent Runtime** - Default to CLI execution, with SDK fallback still available
 - **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
 - **Dependency Management** - PRDs can depend on other PRDs, auto-triggered when dependencies complete
 - **Stagnation Detection** - Auto-detects stuck agents (no progress, repeated errors) and marks as failed
@@ -82,27 +82,16 @@ Ralph MCP keeps the battle-tested foundations:
 
 ## Agent Support
 
-Ralph MCP supports two agent providers for PRD execution:
+Ralph MCP splits agent execution into two dimensions:
 
-### Claude Code (Default)
+- `agent.backend`: `cli` (default) or `sdk`
+- `agent.provider`: `codex` (default) or `claude`
 
-Uses Claude Opus 4 via Claude CLI for agent execution.
+The runner now prefers CLI launchers by default, and can fall back to the SDK backend when a CLI launch fails.
 
-**Requirements:**
-- Claude Code CLI installed
-- LiteLLM proxy running on `localhost:4000` (optional, for custom models)
+### Codex CLI (Default)
 
-**Configuration:**
-```yaml
-# .ralph.yaml
-agent:
-  provider: claude
-  coAuthor: "Claude Opus 4.6 <noreply@anthropic.com>"
-```
-
-### Codex
-
-Uses GPT-5.3 Codex via Codex CLI for agent execution.
+Uses GPT-5.3 Codex via the Codex CLI for agent execution.
 
 **Requirements:**
 - Codex CLI installed
@@ -117,6 +106,7 @@ Uses GPT-5.3 Codex via Codex CLI for agent execution.
 ```yaml
 # .ralph.yaml
 agent:
+  backend: cli
   provider: codex
   coAuthor: "GPT-5.3 Codex <noreply@openai.com>"
   
@@ -142,30 +132,66 @@ agent:
     stallTimeoutMinutes: 5
 ```
 
+### Claude CLI
+
+Uses Claude Code CLI directly when you want the CLI backend but prefer Claude as the provider.
+
+**Requirements:**
+- Claude Code CLI installed
+- LiteLLM proxy running on `localhost:4000` (optional, for custom models)
+
+**Configuration:**
+```yaml
+# .ralph.yaml
+agent:
+  backend: cli
+  provider: claude
+  coAuthor: "Claude Opus 4.6 <noreply@anthropic.com>"
+
+  claude:
+    claudePath: claude
+    additionalFlags: []
+```
+
+### SDK Backend (Fallback / Override)
+
+If you prefer the in-process SDK path, or want a stable fallback when CLI launchers are unavailable, switch `agent.backend` to `sdk`.
+
+```yaml
+agent:
+  backend: sdk
+  provider: claude # or codex
+```
+
 ### Comparison
 
-| Feature | Claude Code | Codex |
-|---------|-------------|-------|
-| **Context Window** | 200k tokens | 128k tokens |
-| **Code Generation** | Excellent | Excellent |
-| **Reasoning** | Strong | Strong |
-| **Tool Use** | Native MCP | CLI-based |
-| **Approval Policy** | Skip permissions | Configurable |
-| **Sandbox Mode** | N/A | Configurable |
-| **Best For** | MCP integration, large context | CLI workflows, fine-grained control |
+| Dimension | Claude | Codex |
+|-----------|--------|-------|
+| **CLI Command** | `claude` | `codex` |
+| **SDK Backend** | Supported | Supported |
+| **Approval Policy** | Skip permissions / CLI flags | Configurable |
+| **Sandbox Mode** | CLI-managed | Configurable |
+| **Best For** | Claude Code workflows | Codex-first automation |
 
 ### Switching Agents
 
-To switch between agents, update your `.ralph.yaml`:
+To switch providers or backends, update your `.ralph.yaml`:
 
 ```yaml
-# Use Claude Code
+# Use Claude CLI
 agent:
+  backend: cli
   provider: claude
 
-# Use Codex
+# Use Codex CLI (default)
 agent:
+  backend: cli
   provider: codex
+
+# Use Claude SDK instead
+agent:
+  backend: sdk
+  provider: claude
 ```
 
 Then restart the Ralph MCP server or run `ralph_doctor` to verify configuration.
@@ -324,23 +350,31 @@ Restart Claude Code to load.
 
 ### Runner backend defaults
 
-- `ralph-runner` now launches PRDs through the SDK backend layer under `src/agent-sdk/`
-- The default provider is `codex`
-- Set `agent.provider: claude` to switch the runner to the Claude SDK backend
-- Legacy `agent.codex.codexPath` remains in the schema for compatibility, but the SDK runner ignores it
+- `ralph-runner` now resolves backend and provider separately
+- Default behavior is `agent.backend: cli` with `agent.provider: codex`
+- When a CLI launch fails, the runner can fall back to the SDK backend
+- Set `agent.backend: sdk` to force the SDK path for a project
 
 Copy `examples/ralph.config.example.yaml` to `.ralph.yaml` in your project, or to `~/.ralph/config.yaml` for a global default:
 
 ```yaml
 agent:
+  backend: cli
   provider: codex
   codex:
+    codexPath: codex
     approvalPolicy: never
     sandboxMode: workspace-write
     level: L2
 
-# Optional: switch the runner to Claude SDK instead
+# Optional: switch the runner to Claude CLI instead
 # agent:
+#   backend: cli
+#   provider: claude
+
+# Optional: force the SDK backend instead
+# agent:
+#   backend: sdk
 #   provider: claude
 ```
 

@@ -1,0 +1,19 @@
+# Copy to .ralph.yaml in a project, or ~/.ralph/config.yaml for a global default.
+agent:
+  backend: cli
+  provider: codex
+  codex:
+    codexPath: codex
+    approvalPolicy: never
+    sandboxMode: workspace-write
+    level: L2
+
+# Optional: switch the runner to Claude CLI instead.
+# agent:
+#   backend: cli
+#   provider: claude
+
+# Optional: force the SDK backend instead.
+# agent:
+#   backend: sdk
+#   provider: claude

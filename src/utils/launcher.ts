@@ -2,8 +2,14 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { openSync, closeSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
+import type { Provider } from "../agent-sdk/types.js";
+import { getConfig } from "../config/loader.js";
 import type { LaunchResult, AgentLauncher } from "../runner.js";
 import { RALPH_DATA_DIR } from "../store/state.js";
+import { createCodexLauncher, type CodexLauncherConfig } from "./codex-launcher.js";
+import { createSdkLauncher, type SdkLauncherConfig } from "./sdk-launcher.js";
+
+export type AgentBackend = "cli" | "sdk";
 
 export interface LauncherConfig {
   /** Path to Claude CLI executable (default: "claude") */
@@ -14,6 +20,55 @@ export interface LauncherConfig {
   launchTimeout?: number;
   /** Callback for logging */
   onLog?: (level: "info" | "warn" | "error", message: string) => void;
+}
+
+export interface ResolvedAgentLaunchConfig {
+  backend: AgentBackend;
+  provider: Provider;
+  claude: Required<Pick<LauncherConfig, "claudePath" | "additionalFlags">>;
+  codex: Required<Pick<CodexLauncherConfig, "codexPath" | "approvalPolicy" | "sandboxMode" | "level" | "maxRecoveryAttempts" | "stallTimeoutMinutes">>;
+}
+
+export interface MultiBackendLauncherConfig {
+  defaultBackend?: AgentBackend;
+  defaultProvider?: Provider;
+  launchTimeout?: number;
+  sdkFallback?: boolean;
+  onLog?: (level: "info" | "warn" | "error", message: string) => void;
+  claude?: Pick<LauncherConfig, "claudePath" | "additionalFlags">;
+  codex?: Pick<CodexLauncherConfig, "codexPath" | "approvalPolicy" | "sandboxMode" | "level" | "maxRecoveryAttempts" | "stallTimeoutMinutes">;
+}
+
+export interface LauncherFactoryOverrides {
+  createClaudeCliLauncher?: (config: LauncherConfig) => AgentLauncher;
+  createCodexCliLauncher?: (config: CodexLauncherConfig) => AgentLauncher;
+  createSdkFallbackLauncher?: (config: SdkLauncherConfig) => AgentLauncher;
+}
+
+export function resolveAgentLaunchConfig(
+  projectRoot: string,
+  defaults: Pick<MultiBackendLauncherConfig, "defaultBackend" | "defaultProvider" | "claude" | "codex"> = {}
+): ResolvedAgentLaunchConfig {
+  const agentConfig = getConfig(projectRoot).agent;
+
+  return {
+    backend: agentConfig.backend ?? defaults.defaultBackend ?? "cli",
+    provider: agentConfig.provider ?? defaults.defaultProvider ?? "codex",
+    claude: {
+      claudePath: defaults.claude?.claudePath ?? agentConfig.claude.claudePath,
+      additionalFlags: defaults.claude?.additionalFlags ?? agentConfig.claude.additionalFlags,
+    },
+    codex: {
+      codexPath: defaults.codex?.codexPath ?? agentConfig.codex.codexPath,
+      approvalPolicy: defaults.codex?.approvalPolicy ?? agentConfig.codex.approvalPolicy,
+      sandboxMode: defaults.codex?.sandboxMode ?? agentConfig.codex.sandboxMode,
+      level: defaults.codex?.level ?? agentConfig.codex.level,
+      maxRecoveryAttempts:
+        defaults.codex?.maxRecoveryAttempts ?? agentConfig.codex.maxRecoveryAttempts,
+      stallTimeoutMinutes:
+        defaults.codex?.stallTimeoutMinutes ?? agentConfig.codex.stallTimeoutMinutes,
+    },
+  };
 }
 
 /**
@@ -222,6 +277,120 @@ export class ClaudeLauncher implements AgentLauncher {
       }, 1000);
     });
   }
+}
+
+export class MultiBackendLauncher implements AgentLauncher {
+  private readonly config: Required<Pick<MultiBackendLauncherConfig, "defaultBackend" | "defaultProvider" | "launchTimeout" | "sdkFallback">> & MultiBackendLauncherConfig;
+  private readonly sdkLauncher: AgentLauncher;
+  private readonly factories: Required<LauncherFactoryOverrides>;
+
+  constructor(
+    config: MultiBackendLauncherConfig = {},
+    factoryOverrides: LauncherFactoryOverrides = {}
+  ) {
+    this.config = {
+      defaultBackend: config.defaultBackend ?? "cli",
+      defaultProvider: config.defaultProvider ?? "codex",
+      launchTimeout: config.launchTimeout ?? 30_000,
+      sdkFallback: config.sdkFallback ?? true,
+      ...config,
+    };
+
+    this.factories = {
+      createClaudeCliLauncher: factoryOverrides.createClaudeCliLauncher
+        ?? ((launcherConfig) => new ClaudeLauncher(launcherConfig)),
+      createCodexCliLauncher: factoryOverrides.createCodexCliLauncher
+        ?? ((launcherConfig) => createCodexLauncher(launcherConfig)),
+      createSdkFallbackLauncher: factoryOverrides.createSdkFallbackLauncher
+        ?? ((launcherConfig) => createSdkLauncher(launcherConfig)),
+    };
+
+    this.sdkLauncher = this.factories.createSdkFallbackLauncher({
+      defaultProvider: this.config.defaultProvider,
+      launchTimeout: this.config.launchTimeout,
+      onLog: this.config.onLog,
+      codex: this.config.codex,
+    });
+  }
+
+  async launch(prompt: string, cwd: string, executionId?: string): Promise<LaunchResult> {
+    const resolved = resolveAgentLaunchConfig(cwd, {
+      defaultBackend: this.config.defaultBackend,
+      defaultProvider: this.config.defaultProvider,
+      claude: this.config.claude,
+      codex: this.config.codex,
+    });
+
+    const primaryLauncher = this.createPrimaryLauncher(resolved);
+    const primaryResult = await primaryLauncher.launch(prompt, cwd, executionId);
+
+    if (primaryResult.success || resolved.backend !== "cli" || !this.config.sdkFallback) {
+      return primaryResult;
+    }
+
+    this.log(
+      "warn",
+      `CLI ${resolved.provider} launch failed${primaryResult.error ? `: ${primaryResult.error}` : ""}; falling back to SDK backend`
+    );
+
+    const fallbackResult = await this.sdkLauncher.launch(prompt, cwd, executionId);
+    if (fallbackResult.success) {
+      return fallbackResult;
+    }
+
+    return {
+      success: false,
+      error: [
+        primaryResult.error ? `CLI launch failed: ${primaryResult.error}` : "CLI launch failed",
+        fallbackResult.error
+          ? `SDK fallback failed: ${fallbackResult.error}`
+          : "SDK fallback failed",
+      ].join("; "),
+    };
+  }
+
+  private createPrimaryLauncher(resolved: ResolvedAgentLaunchConfig): AgentLauncher {
+    if (resolved.backend === "sdk") {
+      return this.sdkLauncher;
+    }
+
+    if (resolved.provider === "claude") {
+      return this.factories.createClaudeCliLauncher({
+        claudePath: resolved.claude.claudePath,
+        additionalFlags: resolved.claude.additionalFlags,
+        launchTimeout: this.config.launchTimeout,
+        onLog: this.config.onLog,
+      });
+    }
+
+    return this.factories.createCodexCliLauncher({
+      codexPath: resolved.codex.codexPath,
+      approvalPolicy: resolved.codex.approvalPolicy,
+      sandboxMode: resolved.codex.sandboxMode,
+      level: resolved.codex.level,
+      maxRecoveryAttempts: resolved.codex.maxRecoveryAttempts,
+      stallTimeoutMinutes: resolved.codex.stallTimeoutMinutes,
+      launchTimeout: this.config.launchTimeout,
+      onLog: this.config.onLog,
+    });
+  }
+
+  private log(level: "info" | "warn" | "error", message: string): void {
+    if (this.config.onLog) {
+      this.config.onLog(level, message);
+    }
+  }
+}
+
+export function createClaudeLauncher(config: LauncherConfig = {}): AgentLauncher {
+  return new ClaudeLauncher(config);
+}
+
+export function createLauncher(
+  config: MultiBackendLauncherConfig = {},
+  factoryOverrides: LauncherFactoryOverrides = {}
+): AgentLauncher {
+  return new MultiBackendLauncher(config, factoryOverrides);
 }
 
 /**
