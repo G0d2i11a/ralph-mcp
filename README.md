@@ -7,6 +7,8 @@
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
+Companion project: use [Ralph CLI](https://github.com/G0d2i11a/ralph-cli) when you want a standalone terminal manager, launchd restart, lease/revision recovery, and a dedicated integration worktree. Use Ralph MCP when you want `ralph_start`, `ralph_status`, and the Ralph Runner available from an MCP-native Claude Code workflow.
+
 [中文文档](./README.zh-CN.md)
 
 ## The Ralph Loop (2 Steps)
@@ -266,6 +268,7 @@ Both approaches respect the same core principle: **structured, iterative executi
 
 - **Original Ralph**: "Do one thing well, then exit" (optimal for 2024 constraints)
 - **Ralph MCP**: "Do all related things in one session" (optimal for 2025+ capabilities)
+- **Ralph CLI**: "Keep the task queue and finalizer outside the chat session" (best for terminal-first automation and always-on managers)
 
 Ralph MCP doesn't replace the original pattern—it extends it for environments where context windows and automation infrastructure support longer-lived agents.
 - **Context Injection** - Inject project rules (CLAUDE.md) into agent context
@@ -681,7 +684,9 @@ ralph_reset_stagnation({ branch: "ralph/prd-feature", resumeExecution: false })
 
 ## Credits
 
+- [G0d2i11a](https://github.com/G0d2i11a) - Maintainer
 - [Geoffrey Huntley](https://ghuntley.com/) - Original Ralph pattern
+- [ralph-cli](https://github.com/G0d2i11a/ralph-cli) - Companion command-line Ralph controller
 - [Anthropic](https://anthropic.com/) - Claude Code & MCP protocol
 
 ## License

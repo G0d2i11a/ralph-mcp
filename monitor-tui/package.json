@@ -15,7 +15,7 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": ["ralph", "mcp", "monitor", "tui"],
-  "author": "ralph-mcp",
+  "author": "G0d2i11a <130071715+G0d2i11a@users.noreply.github.com>",
   "license": "MIT",
   "dependencies": {
     "blessed": "^0.1.81",

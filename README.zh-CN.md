@@ -7,6 +7,8 @@
 
 基于 [Geoffrey Huntley 的 Ralph 模式](https://ghuntley.com/ralph/)。
 
+配套项目：[Ralph CLI](https://github.com/G0d2i11a/ralph-cli) 提供独立命令行 manager、launchd 重启、lease/revision 恢复和独立 integration worktree。需要 Claude Code/MCP 对话里的 `ralph_start` / `ralph_status` 和 Runner 时，用 Ralph MCP；需要终端优先的常驻管理与 finalize 流程时，用 Ralph CLI。
+
 [English](./README.md)
 
 ## 为什么选择 Ralph MCP？
@@ -91,6 +93,7 @@ npm run build
 - 或在 `.ralph.yaml` / `~/.ralph/config.yaml` 里配置 `watchers.prdIngestion`
 - 首次启动时，当前已存在的匹配文件只会被标记为已见，不会回补执行
 - 新出现的 PRD 仍然会先进入 Ralph 正常状态机，再由 Runner 拉起
+- 建议同一批任务只选择一个控制面管理：MCP 负责 MCP/Runner 工作流，CLI 负责终端 manager/finalizer 工作流
 
 示例：
 
