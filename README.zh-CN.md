@@ -3,7 +3,7 @@
 [![npm version](https://badge.fury.io/js/ralph-mcp.svg)](https://www.npmjs.com/package/ralph-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-自主并行执行 PRD 的 Claude Code MCP 服务器。自动解析 PRD、创建隔离 worktree、追踪进度、合并完成的功能。
+自主并行执行 PRD 的 MCP 服务器和 Runner，支持 Codex 或 Claude。自动解析 PRD、创建隔离 worktree、追踪进度、合并完成的功能。
 
 基于 [Geoffrey Huntley 的 Ralph 模式](https://ghuntley.com/ralph/)。
 
@@ -135,7 +135,7 @@ agent:
 
 | 工具 | 说明 |
 |------|------|
-| `ralph_start` | 启动 PRD 执行（解析 PRD，创建 worktree，返回 agent prompt） |
+| `ralph_start` | 启动 PRD 执行（解析 PRD，创建 worktree，交给 Runner 队列） |
 | `ralph_status` | 查看所有 PRD 执行状态 |
 | `ralph_get` | 获取单个 PRD 详情 |
 | `ralph_update` | 更新 User Story 状态（agent 调用） |
@@ -143,6 +143,8 @@ agent:
 | `ralph_merge` | 合并到 main + 清理 worktree |
 | `ralph_merge_queue` | 管理串行合并队列 |
 | `ralph_set_agent_id` | 记录 agent task ID |
+
+依赖是按仓库隔离的：下游 PRD 只会在同一项目里的上游 PRD 已合并，或上游 PRD 元数据包含 merge 流程写入的 `mergeSha` 后解锁。仅 story 全部完成但尚未合并，不会触发下游执行。
 
 ## 使用方法
 
@@ -228,13 +230,15 @@ ralph_stop({ branch: "ralph/prd-feature" })
 // 合并到 main
 ralph_merge({ branch: "ralph/prd-feature" })
 
-// 记录 Task agent ID（用于追踪）
+// 记录 agent ID（用于追踪）
 ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
 ```
 
 ## PRD 格式
 
-Ralph 解析 markdown 格式的 PRD 文件。示例：
+Ralph 支持 markdown 和 JSON PRD。PRD watcher 默认监听 `ez4ielts-*.json` 这类 JSON 文件；JSON 里可以写 `repository`，让 watcher 自动推断 `projectRoot`。
+
+Markdown 示例：
 
 ```markdown
 ---
@@ -267,6 +271,26 @@ priority: high
 - [ ] 忘记密码流程
 ```
 
+JSON 示例：
+
+```json
+{
+  "repository": "~/Project/my-app",
+  "branchName": "ralph/prd-feature",
+  "description": "实现功能",
+  "dependencies": ["ralph/prd-base"],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "功能",
+      "description": "As a user, I want the feature, so that I can work faster.",
+      "acceptanceCriteria": ["端到端可用"],
+      "priority": 1
+    }
+  ]
+}
+```
+
 ## 冲突解决
 
 `ralph_merge` 支持以下策略：
@@ -291,10 +315,10 @@ priority: high
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `prdPath` | 必填 | PRD markdown 文件路径 |
+| `prdPath` | 必填 | PRD markdown 或 JSON 文件路径 |
 | `projectRoot` | 当前目录 | 项目根目录 |
 | `worktree` | `true` | 创建隔离的 git worktree |
-| `autoStart` | `true` | 返回 agent prompt 以便立即执行 |
+| `autoStart` | `true` | Runner 默认模式下不返回 agent prompt；仅 `RALPH_AUTO_RUNNER=false` 时用于手动 prompt |
 | `autoMerge` | `false` | 所有 story 通过后自动合并 |
 | `notifyOnComplete` | `true` | 完成时显示 Windows 通知 |
 | `onConflict` | `"agent"` | 冲突解决策略：`auto_theirs`, `auto_ours`, `notify`, `agent` |

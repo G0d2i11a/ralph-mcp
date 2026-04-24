@@ -33,7 +33,7 @@ import { shutdown, shutdownInputSchema, setShutdownCallback } from "./tools/shut
 const server = new Server(
   {
     name: "ralph",
-    version: "1.0.0",
+    version: "1.1.4",
   },
   {
     capabilities: {
@@ -49,7 +49,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_start",
         description:
-          "Start PRD execution. Parses PRD file, creates worktree, stores state, and returns agent prompt for auto-start. If dependencies are not satisfied, it fails by default, can queue with queueIfBlocked, or can force start with ignoreDependencies.",
+          "Start PRD execution. Parses PRD file, creates worktree, and stores ready/pending state for the Runner. Manual agent prompts are returned only when RALPH_AUTO_RUNNER=false. Dependencies must be merged before dependents start unless ignored.",
         annotations: {
           title: "Start PRD Execution",
           readOnlyHint: false,
@@ -94,9 +94,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Conflict resolution strategy for merge (default: agent)",
               default: "agent",
             },
+            contextInjectionPath: {
+              type: "string",
+              description: "Path to a file (e.g., CLAUDE.md) to inject into manual-mode agent prompts",
+            },
             ignoreDependencies: {
               type: "boolean",
-              description: "Skip dependency check and start even if dependencies are not satisfied (default: false)",
+              description: "Skip dependency check and start even if dependencies are not merged (default: false)",
               default: false,
             },
             queueIfBlocked: {
@@ -129,13 +133,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             status: {
               type: "string",
-              enum: ["pending", "ready", "starting", "running", "completed", "failed", "stopped", "merging"],
+              enum: ["pending", "ready", "starting", "running", "interrupted", "completed", "failed", "stopped", "merging", "merged"],
               description: "Filter by status",
             },
             reconcile: {
               type: "boolean",
               description: "Auto-fix status inconsistencies with git (default: true)",
               default: true,
+            },
+            historyLimit: {
+              type: "number",
+              description: "Number of recent archived records to include in history (default: 10)",
+              default: 10,
             },
           },
         },
@@ -198,6 +207,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             error: {
               type: "string",
               description: "Error message if stuck (for stagnation detection)",
+            },
+            step: {
+              type: "string",
+              description: "Current step label (e.g., implementing/testing/building/verifying)",
+            },
+            acEvidence: {
+              type: "object",
+              description: "Per-AC evidence mapping, keyed by AC id",
+              additionalProperties: {
+                type: "object",
+                properties: {
+                  passes: { type: "boolean" },
+                  evidence: { type: "string" },
+                  command: { type: "string" },
+                  output: { type: "string" },
+                  blockedReason: { type: "string" },
+                },
+              },
+            },
+            hardGates: {
+              type: "object",
+              description: "Hard gate verification results for typecheck/build",
+            },
+            skipHardGates: {
+              type: "boolean",
+              description: "Skip hard gate verification for non-code stories (default: false)",
+              default: false,
+            },
+            scopeExplanation: {
+              type: "object",
+              description: "Required explanation when scope guardrails are exceeded",
+            },
+            skipScopeCheck: {
+              type: "boolean",
+              description: "Skip scope guardrail check (default: false)",
+              default: false,
+            },
+            expectedFiles: {
+              type: "array",
+              items: { type: "string" },
+              description: "Files declared before implementation that are expected to change",
+            },
+            unexpectedFileExplanation: {
+              type: "object",
+              description: "Explanation for files changed outside expectedFiles declaration",
             },
           },
           required: ["branch", "storyId", "passes"],
@@ -262,6 +316,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ["auto_theirs", "auto_ours", "notify", "agent"],
               description: "Override conflict resolution strategy",
             },
+            skipQualityChecks: {
+              type: "boolean",
+              description: "Skip type check and build (default: false)",
+              default: false,
+            },
           },
           required: ["branch"],
         },
@@ -322,7 +381,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "ralph_batch_start",
         description:
-          "Start multiple PRDs with dependency resolution. Parses all PRDs, creates worktrees, runs pnpm install serially (avoids store lock), and returns agent prompts for PRDs whose dependencies are satisfied.",
+          "Start multiple PRDs with dependency resolution. Parses all PRDs, creates worktrees, preheats dependencies, and queues ready/pending executions for the Runner. Manual prompts are returned only when RALPH_AUTO_RUNNER=false.",
         annotations: {
           title: "Batch Start PRDs",
           readOnlyHint: false,

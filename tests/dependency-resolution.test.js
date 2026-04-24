@@ -101,12 +101,48 @@ after(async () => {
   }
 });
 
-test("areDependenciesSatisfied treats completed dependency PRD file as satisfied", async () => {
+test("areDependenciesSatisfied requires merge metadata for completed dependency PRD files", async () => {
   const projectRoot = join(dataDir, "project");
   const tasksDir = join(projectRoot, "tasks");
   await mkdir(tasksDir, { recursive: true });
 
   await writeFile(join(tasksDir, "prd-dep.md"), "---\nstatus: completed\n---\n# Dep\n", "utf-8");
+  const mainPath = join(tasksDir, "prd-main.md");
+  await writeFile(mainPath, "---\nstatus: pending\n---\n# Main\n", "utf-8");
+
+  const depStatus = await state.areDependenciesSatisfied({
+    dependencies: ["ralph/prd-dep"],
+    projectRoot,
+    prdPath: mainPath,
+  });
+
+  assert.equal(depStatus.satisfied, false);
+  assert.deepEqual(depStatus.pending, ["ralph/prd-dep"]);
+  assert.deepEqual(depStatus.completed, []);
+
+  await writeFile(
+    join(tasksDir, "prd-dep.md"),
+    "---\nstatus: completed\nmergeSha: abc123\n---\n# Dep\n",
+    "utf-8"
+  );
+
+  const mergedDepStatus = await state.areDependenciesSatisfied({
+    dependencies: ["ralph/prd-dep"],
+    projectRoot,
+    prdPath: mainPath,
+  });
+
+  assert.equal(mergedDepStatus.satisfied, true);
+  assert.deepEqual(mergedDepStatus.pending, []);
+  assert.deepEqual(mergedDepStatus.completed, ["ralph/prd-dep"]);
+});
+
+test("areDependenciesSatisfied treats merged dependency PRD file as satisfied", async () => {
+  const projectRoot = join(dataDir, "project");
+  const tasksDir = join(projectRoot, "tasks");
+  await mkdir(tasksDir, { recursive: true });
+
+  await writeFile(join(tasksDir, "prd-dep.md"), "---\nstatus: merged\n---\n# Dep\n", "utf-8");
   const mainPath = join(tasksDir, "prd-main.md");
   await writeFile(mainPath, "---\nstatus: pending\n---\n# Main\n", "utf-8");
 
@@ -139,7 +175,7 @@ test("areDependenciesSatisfied uses dependency PRD frontmatter branch for state 
     makeExecution({
       id: "dep",
       branch: "ralph/custom-branch",
-      status: "completed",
+      status: "merged",
       projectRoot,
     })
   );
@@ -173,7 +209,7 @@ test("areDependenciesSatisfied uses dependency PRD JSON branchName for state loo
     makeExecution({
       id: "dep",
       branch: "ralph/custom-branch",
-      status: "completed",
+      status: "merged",
       projectRoot,
     })
   );
@@ -208,7 +244,7 @@ test("areDependenciesSatisfied resolves dependency by PRD id when filename/branc
     makeExecution({
       id: "dep",
       branch: "ralph/prd-subscription-system-cn",
-      status: "completed",
+      status: "merged",
       projectRoot,
     })
   );
@@ -224,7 +260,7 @@ test("areDependenciesSatisfied resolves dependency by PRD id when filename/branc
   assert.deepEqual(depStatus.completed, ["ralph/prd-subscription-system"]);
 });
 
-test("areDependenciesSatisfied treats dependency satisfied if any archived record is completed", async () => {
+test("areDependenciesSatisfied treats dependency satisfied if same-repo archived record is merged", async () => {
   const projectRoot = join(dataDir, "project");
   const tasksDir = join(projectRoot, "tasks");
   await mkdir(tasksDir, { recursive: true });
@@ -246,13 +282,13 @@ test("areDependenciesSatisfied treats dependency satisfied if any archived recor
 
   await state.insertExecution(
     makeExecution({
-      id: "dep-completed",
+      id: "dep-merged",
       branch: depBranch,
-      status: "completed",
+      status: "merged",
       projectRoot,
     })
   );
-  await state.archiveExecution("dep-completed");
+  await state.archiveExecution("dep-merged");
 
   const depStatus = await state.areDependenciesSatisfied({
     dependencies: [depBranch],
@@ -265,7 +301,40 @@ test("areDependenciesSatisfied treats dependency satisfied if any archived recor
   assert.deepEqual(depStatus.completed, [depBranch]);
 });
 
-test("runner unblocks a queued PRD once dependency PRD file is marked completed", async () => {
+test("areDependenciesSatisfied ignores merged records from other project roots", async () => {
+  const projectRoot = join(dataDir, "project-a");
+  const otherProjectRoot = join(dataDir, "project-b");
+  const tasksDir = join(projectRoot, "tasks");
+  await mkdir(tasksDir, { recursive: true });
+  await mkdir(join(otherProjectRoot, "tasks"), { recursive: true });
+
+  const mainPath = join(tasksDir, "prd-main.md");
+  await writeFile(mainPath, "---\nstatus: pending\n---\n# Main\n", "utf-8");
+
+  const depBranch = "ralph/prd-dep";
+
+  await state.insertExecution(
+    makeExecution({
+      id: "other-dep",
+      branch: depBranch,
+      status: "merged",
+      projectRoot: otherProjectRoot,
+    })
+  );
+  await state.archiveExecution("other-dep");
+
+  const depStatus = await state.areDependenciesSatisfied({
+    dependencies: [depBranch],
+    projectRoot,
+    prdPath: mainPath,
+  });
+
+  assert.equal(depStatus.satisfied, false);
+  assert.deepEqual(depStatus.pending, [depBranch]);
+  assert.deepEqual(depStatus.completed, []);
+});
+
+test("runner unblocks a queued PRD once dependency PRD file has merge metadata", async () => {
   const repoDir = await mkdtemp(join(tmpdir(), "ralph-mcp-repo-"));
   try {
     initRepo(repoDir);
@@ -322,10 +391,10 @@ test("runner unblocks a queued PRD once dependency PRD file is marked completed"
 
     const runner = new Runner({ concurrency: 1, onLog: () => {} }, launcher);
 
-    // Mark dependency as completed and let the runner promote pending -> ready.
+    // Mark dependency as merged and let the runner promote pending -> ready.
     await writeFile(
       join(tasksDir, "prd-dep.md"),
-      ["---", "branch: ralph/prd-dep", "status: completed", "---", "# Dep PRD"].join("\n"),
+      ["---", "branch: ralph/prd-dep", "status: completed", "mergeSha: abc123", "---", "# Dep PRD"].join("\n"),
       "utf-8"
     );
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync, type Dirent } from "fs";
 import { readFile, readdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { dirname, isAbsolute, join } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
 import * as lockfile from "proper-lockfile";
 import matter from "gray-matter";
 import { generateBranchName } from "../utils/prd-parser.js";
@@ -792,6 +792,29 @@ export async function updateMergeQueueItem(
   });
 }
 
+export async function claimNextMergeQueueItem(): Promise<{
+  item: MergeQueueItem | null;
+  blockedByCurrent: boolean;
+}> {
+  return mutateState((s) => {
+    const current = s.mergeQueue.find((q) => q.status === "merging");
+    if (current) {
+      return { item: { ...current }, blockedByCurrent: true };
+    }
+
+    const next = s.mergeQueue
+      .filter((q) => q.status === "pending")
+      .sort((a, b) => a.position - b.position || a.id - b.id)[0];
+
+    if (!next) {
+      return { item: null, blockedByCurrent: false };
+    }
+
+    next.status = "merging";
+    return { item: { ...next }, blockedByCurrent: false };
+  });
+}
+
 export async function deleteMergeQueueByExecutionId(executionId: string): Promise<void> {
   return mutateState((s) => {
     s.mergeQueue = s.mergeQueue.filter((q) => q.executionId !== executionId);
@@ -807,9 +830,23 @@ export async function findExecutionsDependingOn(branch: string): Promise<Executi
   );
 }
 
+function normalizeProjectRootForCompare(projectRoot: string | null | undefined): string | null {
+  if (typeof projectRoot !== "string" || projectRoot.trim().length === 0) {
+    return null;
+  }
+  return resolve(projectRoot.trim());
+}
+
+function isSameProjectRoot(a: string | null | undefined, b: string | null | undefined): boolean {
+  const left = normalizeProjectRootForCompare(a);
+  const right = normalizeProjectRootForCompare(b);
+  return !!left && !!right && left === right;
+}
+
 /**
- * Check if all dependencies of an execution are completed.
- * Checks both active executions (status: "completed") and archived executions (status: "merged").
+ * Check if all dependencies of an execution have been integrated.
+ * A dependency is satisfied only by the same project root and a merged state record,
+ * or by PRD metadata that includes a mergeSha written by the merge flow.
  */
 export async function areDependenciesSatisfied(execution: Pick<ExecutionRecord, "dependencies" | "projectRoot" | "prdPath">): Promise<{
   satisfied: boolean;
@@ -964,7 +1001,8 @@ export async function areDependenciesSatisfied(execution: Pick<ExecutionRecord, 
     const depFrontmatter = depMeta?.frontmatter ?? null;
 
     const statusValue = typeof depFrontmatter?.status === "string" ? depFrontmatter.status.trim().toLowerCase() : null;
-    if (statusValue === "completed" || statusValue === "merged") {
+    const mergeShaValue = typeof depFrontmatter?.mergeSha === "string" ? depFrontmatter.mergeSha.trim() : "";
+    if (statusValue === "merged" || (statusValue === "completed" && mergeShaValue.length > 0)) {
       completed.push(depBranch);
       continue;
     }
@@ -1005,11 +1043,14 @@ export async function areDependenciesSatisfied(execution: Pick<ExecutionRecord, 
 
   return readState((s) => {
     const isSatisfiedStatus = (status: ExecutionStatus): boolean =>
-      status === "completed" || status === "merged";
+      status === "merged";
 
     for (const { dep, stateBranches } of remaining) {
       const satisfiedActive = s.executions.some(
-        (e) => stateBranches.includes(e.branch) && isSatisfiedStatus(e.status)
+        (e) =>
+          isSameProjectRoot(e.projectRoot, execution.projectRoot) &&
+          stateBranches.includes(e.branch) &&
+          isSatisfiedStatus(e.status)
       );
       if (satisfiedActive) {
         completed.push(dep);
@@ -1017,7 +1058,10 @@ export async function areDependenciesSatisfied(execution: Pick<ExecutionRecord, 
       }
 
       const satisfiedArchived = s.archivedExecutions.some(
-        (e) => stateBranches.includes(e.branch) && isSatisfiedStatus(e.status)
+        (e) =>
+          isSameProjectRoot(e.projectRoot, execution.projectRoot) &&
+          stateBranches.includes(e.branch) &&
+          isSatisfiedStatus(e.status)
       );
       if (satisfiedArchived) {
         completed.push(dep);

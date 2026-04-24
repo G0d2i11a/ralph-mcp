@@ -21,6 +21,7 @@ import {
 import { execSync } from "child_process";
 import {
   archiveExecution,
+  claimNextMergeQueueItem,
   deleteMergeQueueByExecutionId,
   findExecutionByBranch,
   findExecutionById,
@@ -200,7 +201,7 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     // Step 2: Run quality checks (unless skipped)
     if (!input.skipQualityChecks && !input.force && exec.worktreePath) {
       console.log(">>> Running quality checks...");
-      const qualityResult = await runQualityChecks(exec.worktreePath);
+      const qualityResult = await runQualityChecks(exec.worktreePath, config);
 
         if (!qualityResult.success) {
         const failedChecks = [];
@@ -226,7 +227,8 @@ export async function merge(input: MergeInput): Promise<MergeResult> {
     const commitMessage = generateCommitMessage(
       exec.branch,
       exec.description,
-      completedStories
+      completedStories,
+      config
     );
 
     // Step 4: Attempt merge to main
@@ -548,6 +550,8 @@ async function mergeBranchWithMessage(
   // Always merge in projectRoot (main repo is already on main branch)
   const cwd = projectRoot;
 
+  const mainBranch = config?.merge?.mainBranch || DEFAULT_CONFIG.merge.mainBranch;
+
   // Get remote from config (can be null to skip remote operations)
   const remote = config?.merge ? config.merge.remote : DEFAULT_CONFIG.merge.remote;
 
@@ -565,8 +569,8 @@ async function mergeBranchWithMessage(
   // Fetch latest main and pull only if remote exists
   if (hasRemote && remote) {
     try {
-      await execPromise(`git fetch ${remote} main`, { cwd });
-      await execPromise(`git pull ${remote} main`, { cwd });
+      await execPromise(`git fetch ${remote} ${mainBranch}`, { cwd });
+      await execPromise(`git pull ${remote} ${mainBranch}`, { cwd });
     } catch {
       // Ignore fetch/pull errors
     }
@@ -574,7 +578,7 @@ async function mergeBranchWithMessage(
 
   // Check if branch is already merged into main
   try {
-    const mergeBase = (hasRemote && remote) ? `${remote}/main` : "main";
+    const mergeBase = (hasRemote && remote) ? `${remote}/${mainBranch}` : mainBranch;
     const { stdout: mergedBranches } = await execPromise(
       `git branch --merged ${mergeBase}`,
       { cwd }
@@ -629,7 +633,7 @@ async function mergeBranchWithMessage(
       // Push to remote if available
       if (hasRemote && remote) {
         try {
-          await execPromise(`git push ${remote} main`, { cwd });
+          await execPromise(`git push ${remote} ${mainBranch}`, { cwd });
         } catch {
           // Ignore push errors (e.g., no remote configured)
         }
@@ -752,8 +756,20 @@ export async function mergeQueueAction(
   }
 
   if (input.action === "process") {
-    // Process next item in queue
-    const next = queue.find((q) => q.status === "pending");
+    const claim = await claimNextMergeQueueItem();
+
+    if (claim.blockedByCurrent) {
+      const exec = claim.item ? await findExecutionById(claim.item.executionId) : null;
+      return {
+        queue: queue.map((q) => q.executionId),
+        current: exec?.branch,
+        message: exec
+          ? `Merge already in progress for ${exec.branch}`
+          : "Merge already in progress",
+      };
+    }
+
+    const next = claim.item;
     if (!next) {
       return {
         queue: [],
@@ -764,14 +780,18 @@ export async function mergeQueueAction(
     const exec = await findExecutionById(next.executionId);
 
     if (exec) {
-      // Update queue status
-      await updateMergeQueueItem(next.id, { status: "merging" });
-
       // Perform merge
-      const result = await merge({ branch: exec.branch, force: false, skipQualityChecks: false });
+      let result: MergeResult;
+      try {
+        result = await merge({ branch: exec.branch, force: false, skipQualityChecks: false });
+      } catch (error) {
+        await updateMergeQueueItem(next.id, { status: "failed" });
+        throw error;
+      }
 
-      // Update queue status
-      await updateMergeQueueItem(next.id, { status: result.success ? "completed" : "failed" });
+      if (!result.success) {
+        await updateMergeQueueItem(next.id, { status: "failed" });
+      }
 
       return {
         queue: queue.slice(1).map((q) => q.executionId),

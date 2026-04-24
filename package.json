@@ -1,7 +1,7 @@
 {
   "name": "ralph-mcp",
   "version": "1.1.4",
-  "description": "MCP server for autonomous PRD execution with Claude Code. Git worktree isolation, progress tracking, auto-merge.",
+  "description": "MCP server and runner for autonomous PRD execution with Codex or Claude. Git worktree isolation, progress tracking, auto-merge.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -46,19 +46,22 @@
   "homepage": "https://github.com/G0d2i11a/ralph-mcp#readme",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "SKILL-EXAMPLE.md",
+    "examples"
   ],
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "file:../agent-browser/node_modules/@anthropic-ai/claude-agent-sdk",
-    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.119",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "gray-matter": "^4.0.3",
     "node-notifier": "^10.0.1",
     "proper-lockfile": "^4.1.2",
     "yaml": "^2.8.2",
-    "zod": "^3.25.76"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.19.7",

@@ -295,6 +295,36 @@ test("runner warns once when global running/starting exceeds configured concurre
   assert.equal(warns.length, 1);
 });
 
+test("runner startup does not interrupt fresh running PRDs", async () => {
+  const launcher = {
+    launch: async (_prompt, _cwd, executionId) => {
+      return { success: true, agentTaskId: `agent-${executionId}`, logPath: null };
+    },
+  };
+  const runner = new Runner({ interval: 60_000, concurrency: 1, onLog: () => {} }, launcher);
+
+  await state.insertExecution(
+    makeExecution({
+      id: "still-running",
+      branch: "ralph/still-running",
+      status: "running",
+      updatedAt: new Date(),
+      lastProgressAt: new Date(),
+    })
+  );
+
+  try {
+    runner.start();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const exec = await state.findExecutionByBranch("ralph/still-running");
+    assert.equal(exec?.status, "running");
+    assert.notEqual(exec?.lastError, "Agent orphaned: Runner restarted");
+  } finally {
+    runner.stop();
+  }
+});
+
 test("runner recovers PRDs stuck in starting (revert to ready)", async () => {
   const launcher = {
     launch: async () => {

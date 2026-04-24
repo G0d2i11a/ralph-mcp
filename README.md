@@ -48,7 +48,7 @@ Ralph MCP extends [snarktank/ralph](https://github.com/snarktank/ralph) with pro
 | **Agent Lifecycle** | One process per User Story | One long-lived agent per PRD |
 | **Execution Model** | Manual script invocation | Background Runner + MCP integration |
 | **Parallel PRDs** | Sequential only | 5+ PRDs simultaneously |
-| **Dependency Management** | Manual coordination | Auto-triggered when dependencies complete |
+| **Dependency Management** | Manual coordination | Auto-triggered after dependencies are merged |
 | **Stagnation Detection** | None | Auto-detects stuck agents, marks as failed |
 | **Agent Memory** | None | Progress Log persists learnings across stories |
 | **Merge Coordination** | Manual | Serial merge queue with conflict resolution |
@@ -78,7 +78,7 @@ Ralph MCP keeps the battle-tested foundations:
 - **Parallel Execution** - Run 5+ PRDs simultaneously with long-lived Ralph agents
 - **CLI-First Agent Runtime** - Default to CLI execution, with SDK fallback still available
 - **Git Worktree Isolation** - Each PRD runs in its own worktree, zero conflicts
-- **Dependency Management** - PRDs can depend on other PRDs, auto-triggered when dependencies complete
+- **Dependency Management** - PRDs can depend on other PRDs; dependents start only after dependency PRDs are integrated in the same project
 - **Stagnation Detection** - Auto-detects stuck agents (no progress, repeated errors) and marks as failed
 - **Agent Memory** - Persistent "Progress Log" learns from mistakes across User Stories
 
@@ -442,8 +442,8 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 
 | Tool | Description |
 |------|-------------|
-| `ralph_start` | Start PRD execution (parse PRD, create worktree, return agent prompt) |
-| `ralph_batch_start` | Start multiple PRDs with dependency resolution |
+| `ralph_start` | Start PRD execution (parse PRD, create worktree, queue for Runner) |
+| `ralph_batch_start` | Start multiple PRDs with dependency resolution and Runner queueing |
 | `ralph_status` | View all PRD execution status |
 | `ralph_get` | Get single PRD details |
 | `ralph_update` | Update User Story status (called by agent) |
@@ -452,7 +452,7 @@ This enables Claude to automatically use Ralph when you mention PRD execution.
 | `ralph_merge_queue` | Manage serial merge queue |
 | `ralph_set_agent_id` | Record agent task ID |
 | `ralph_retry` | Retry a failed PRD execution |
-| `ralph_reset_stagnation` | Reset stagnation counters after manual interion |
+| `ralph_reset_stagnation` | Reset stagnation counters after manual intervention |
 
 ## Usage
 
@@ -508,7 +508,8 @@ ralph_merge({ branch: "ralph/prd-feature" })
 ### API Reference
 
 ```javascript
-// Start PRD execution (returns agent prompt)
+// Start PRD execution.
+// Default Runner mode returns null agentPrompt and lets ralph-runner claim it.
 ralph_start({ prdPath: "tasks/prd-feature.md" })
 
 // Start multiple PRDs in parallel
@@ -533,7 +534,7 @@ ralph_merge({ branch: "ralph/prd-feature" })
 ralph_set_agent_id({ branch: "ralph/prd-feature", agentTaskId: "abc123" })
 
 // Retry a failed execution
-ralph_retry({ branch: "ralph/prd-feare" })
+ralph_retry({ branch: "ralph/prd-feature" })
 
 // Reset stagnation counters (after manual fix)
 ralph_reset_stagnation({ branch: "ralph/prd-feature" })
@@ -541,7 +542,9 @@ ralph_reset_stagnation({ branch: "ralph/prd-feature" })
 
 ## PRD Format
 
-Ralph parses markdown PRD files. Example:
+Ralph parses markdown and JSON PRD files. The PRD watcher defaults to JSON files such as `ez4ielts-*.json`; include `repository` in JSON PRDs when the watcher should infer `projectRoot` from the PRD file itself.
+
+Markdown example:
 
 ```markdown
 ---
@@ -574,6 +577,26 @@ Users can log into their accounts.
 - [ ] Forgot password flow
 ```
 
+JSON example:
+
+```json
+{
+  "repository": "~/Project/my-app",
+  "branchName": "ralph/prd-feature",
+  "description": "Implement feature",
+  "dependencies": ["ralph/prd-base"],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Feature",
+      "description": "As a user, I want the feature, so that I can work faster.",
+      "acceptanceCriteria": ["Works end to end"],
+      "priority": 1
+    }
+  ]
+}
+```
+
 ## Conflict Resolution
 
 `ralph_merge` supports these strategies:
@@ -598,16 +621,18 @@ Override data directory with `RALPH_DATA_DIR` environment variable.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `prdPath` | required | Path to PRD markdown file |
+| `prdPath` | required | Path to PRD markdown or JSON file |
 | `projectRoot` | cwd | Project root directory |
 | `worktree` | `true` | Create isolated git worktree |
-| `autoStart` | `true` | Return agent prompt for immediate execution |
+| `autoStart` | `true` | Runner mode queues the PRD; manual prompt generation is only active with `RALPH_AUTO_RUNNER=false` |
 | `autoMerge` | `true` | Auto add to merge queue when all stories pass |
 | `notifyOnComplete` | `true` | Show Windows notification on completion |
 | `onConflict` | `"agent"` | Conflict resolution: `auto_theirs`, `auto_ours`, `notify`, `agent` |
-| `contextInjectionPath` | `undefined` | Optionalfile (e.g. CLAUDE.md) to inject into prompt |
-| `ignoreDependencies` | `false` | Skip dependency check and start even if dependencies are not satisfied |
-| `queueIfBlocked` | `false` | If dependencies are not satisfied, create a pending execution instead of failing |
+| `contextInjectionPath` | `undefined` | Optional file (e.g. CLAUDE.md) to inject into manual-mode prompts |
+| `ignoreDependencies` | `false` | Skip dependency check and start even if dependencies are not merged |
+| `queueIfBlocked` | `false` | If dependencies are not merged, create a pending execution instead of failing |
+
+Dependencies are repo-scoped. A pending PRD is unblocked by a same-project merged execution record, or by PRD metadata that includes `mergeSha` from the merge flow. A PRD that has only completed its stories but has not been merged does not unblock downstream work.
 
 ### Example with options
 

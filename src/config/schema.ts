@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+type Defined<T> = T extends undefined ? never : T;
+
+function withParsedDefault<T extends z.ZodType>(schema: T): z.ZodDefault<T> {
+  return schema.default(() => schema.parse({}) as Defined<z.output<T>>);
+}
+
 // =============================================================================
 // GATE CONFIGURATION
 // =============================================================================
@@ -111,18 +117,18 @@ export const ModeConfigSchema = z.object({
     .enum(["exploration", "delivery"])
     .default("delivery")
     .describe("Default execution mode"),
-  exploration: z
-    .object({
+  exploration: withParsedDefault(
+    z.object({
       autoMerge: z.boolean().default(false).describe("Auto-merge in exploration mode"),
       notifyOnComplete: z.boolean().default(true).describe("Notify on completion"),
     })
-    .default({}),
-  delivery: z
-    .object({
+  ),
+  delivery: withParsedDefault(
+    z.object({
       autoMerge: z.boolean().default(true).describe("Auto-merge in delivery mode"),
       notifyOnComplete: z.boolean().default(true).describe("Notify on completion"),
     })
-    .default({}),
+  ),
   aliases: z
     .record(z.string(), z.enum(["exploration", "delivery"]))
     .default({
@@ -155,8 +161,8 @@ export const AgentConfigSchema = z.object({
     .string()
     .optional()
     .describe("Path to context file to inject into agent prompt"),
-  claude: z
-    .object({
+  claude: withParsedDefault(
+    z.object({
       claudePath: z
         .string()
         .default("claude")
@@ -166,10 +172,10 @@ export const AgentConfigSchema = z.object({
         .default([])
         .describe("Additional flags passed to Claude CLI when backend: cli"),
     })
-    .default({})
+  )
     .describe("Claude CLI configuration (used when provider: claude and backend: cli)"),
-  codex: z
-    .object({
+  codex: withParsedDefault(
+    z.object({
       codexPath: z
         .string()
         .default("codex")
@@ -195,10 +201,10 @@ export const AgentConfigSchema = z.object({
         .default(5)
         .describe("Minutes of inactivity before detecting Codex CLI stall"),
     })
-    .default({})
+  )
     .describe("Codex configuration (used when provider: codex)"),
-  stagnation: z
-    .object({
+  stagnation: withParsedDefault(
+    z.object({
       noProgressThreshold: z
         .number()
         .default(3)
@@ -212,15 +218,15 @@ export const AgentConfigSchema = z.object({
         .default(10)
         .describe("Maximum loops per story"),
     })
-    .default({}),
-  staleDetection: z
-    .object({
+  ),
+  staleDetection: withParsedDefault(
+    z.object({
       enabled: z
         .boolean()
         .default(true)
         .describe("Enable multi-signal stale detection for long-running tasks"),
-      timeoutsMs: z
-        .object({
+      timeoutsMs: withParsedDefault(
+        z.object({
           implementing: z
             .number()
             .default(30 * 60 * 1000)
@@ -242,9 +248,9 @@ export const AgentConfigSchema = z.object({
             .default(30 * 60 * 1000)
             .describe("Fallback stale timeout when task type is unknown (default: 30m)"),
         })
-        .default({}),
-      signals: z
-        .object({
+      ),
+      signals: withParsedDefault(
+        z.object({
           gitCommits: z
             .boolean()
             .default(true)
@@ -262,7 +268,7 @@ export const AgentConfigSchema = z.object({
             .default(true)
             .describe("Use execution.updatedAt as an activity signal"),
         })
-        .default({}),
+      ),
       maxFilesToStat: z
         .number()
         .default(200)
@@ -272,7 +278,7 @@ export const AgentConfigSchema = z.object({
         .default(20_000)
         .describe("How many bytes of agent log to read for task inference (default: 20KB)"),
     })
-    .default({}),
+  ),
 });
 
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
@@ -307,13 +313,13 @@ export const MergeConfigSchema = z.object({
     .default("agent")
     .describe("Default conflict resolution strategy"),
   autoMerge: z.boolean().default(true).describe("Auto-merge when all stories pass"),
-  updateDocs: z
-    .object({
+  updateDocs: withParsedDefault(
+    z.object({
       todo: z.boolean().default(true).describe("Update TODO.md on merge"),
       projectStatus: z.boolean().default(true).describe("Update PROJECT-STATUS.md on merge"),
       prdIndex: z.boolean().default(true).describe("Update tasks/INDEX.md on merge"),
     })
-    .default({}),
+  ),
 });
 
 export type MergeConfig = z.infer<typeof MergeConfigSchema>;
@@ -360,7 +366,7 @@ export const PrdIngestionWatcherConfigSchema = z.object({
 export type PrdIngestionWatcherConfig = z.infer<typeof PrdIngestionWatcherConfigSchema>;
 
 export const WatchersConfigSchema = z.object({
-  prdIngestion: PrdIngestionWatcherConfigSchema.default({}),
+  prdIngestion: withParsedDefault(PrdIngestionWatcherConfigSchema),
 });
 
 export type WatchersConfig = z.infer<typeof WatchersConfigSchema>;
@@ -377,17 +383,17 @@ export const RalphConfigSchema = z.object({
     .describe("Presets to extend (e.g., ['preset:node-pnpm'])"),
 
   // Configuration sections
-  project: ProjectConfigSchema.default({}),
-  storage: StorageConfigSchema.default({}),
-  worktree: WorktreeConfigSchema.default({}),
-  packageManager: PackageManagerConfigSchema.default({}),
+  project: withParsedDefault(ProjectConfigSchema),
+  storage: withParsedDefault(StorageConfigSchema),
+  worktree: withParsedDefault(WorktreeConfigSchema),
+  packageManager: withParsedDefault(PackageManagerConfigSchema),
   gates: z.array(GateSchema).default([]).describe("Quality gates to run before merge"),
-  scope: ScopeConfigSchema.default({}),
-  modes: ModeConfigSchema.default({}),
-  agent: AgentConfigSchema.default({}),
-  watchers: WatchersConfigSchema.default({}),
-  notifications: NotificationConfigSchema.default({}),
-  merge: MergeConfigSchema.default({}),
+  scope: withParsedDefault(ScopeConfigSchema),
+  modes: withParsedDefault(ModeConfigSchema),
+  agent: withParsedDefault(AgentConfigSchema),
+  watchers: withParsedDefault(WatchersConfigSchema),
+  notifications: withParsedDefault(NotificationConfigSchema),
+  merge: withParsedDefault(MergeConfigSchema),
 });
 
 export type RalphConfig = z.infer<typeof RalphConfigSchema>;
