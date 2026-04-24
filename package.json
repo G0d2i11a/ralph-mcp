@@ -9,7 +9,7 @@
     "ralph-runner": "dist/runner-cli.js"
   },
   "scripts": {
-    "test": "pnpm build && node --test --test-concurrency=1",
+    "test": "pnpm build && node --test --test-concurrency=1 tests/*.test.js",
     "build": "tsc",
     "check-types": "tsc --noEmit",
     "dev": "tsx watch src/index.ts",
