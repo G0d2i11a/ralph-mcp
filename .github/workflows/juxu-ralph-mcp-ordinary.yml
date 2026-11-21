@@ -30,8 +30,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GUEST_ENVIRONMENT" == self-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
-          [[ "$RUNNER_NAME" =~ ^juxu-ralph-mcp-[a-f0-9]{16}$ ]]
+          [[ "$GUEST_ENVIRONMENT" == self-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]] || exit 1
+          [[ "$RUNNER_NAME" =~ ^juxu-ralph-mcp-[a-f0-9]{16}$ ]] || exit 1
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           npm install --prefix "$RUNNER_TEMP/juxu-tools" --ignore-scripts --no-audit --no-fund pnpm@10.17.1
           export PATH="$RUNNER_TEMP/juxu-tools/node_modules/.bin:$PATH"
           printf '%s\n' "$RUNNER_TEMP/juxu-tools/node_modules/.bin" >> "$GITHUB_PATH"
