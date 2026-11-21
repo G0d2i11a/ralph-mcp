@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: juxu-ralph-mcp-ordinary
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Test Ralph MCP
